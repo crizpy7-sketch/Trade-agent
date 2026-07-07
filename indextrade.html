@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0D1613">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DAYTRADER">
+<title>DAYTRADER</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --bg:#0D1613; --panel:#14201B; --panel2:#182620; --line:#223129;
+  --ink:#EAE6D9; --muted:#8FA096; --dim:#5C6B62;
+  --accent:#FF8A2A; --accent-ink:#1A0E02;
+  --up:#52D98B; --down:#F0544F;
+  --r:12px;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+  --sans:'Archivo',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{background:var(--bg);color:var(--ink);font-family:var(--sans);min-height:100dvh}
+body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;width:100%}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+.mono{font-family:var(--mono)}
+
+/* header */
+header{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:calc(14px + env(safe-area-inset-top)) 16px 12px;position:sticky;top:0;z-index:20;
+  background:linear-gradient(var(--bg) 78%,transparent)}
+.wordmark{font-weight:800;letter-spacing:.14em;font-size:15px}
+.wordmark span{color:var(--accent)}
+.hdr-right{display:flex;align-items:center;gap:8px}
+.pill{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;padding:5px 9px;border-radius:999px;
+  border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.pill.auto{border-color:var(--accent);color:var(--accent)}
+.pill.halted{border-color:var(--down);color:var(--down)}
+
+/* banners */
+.banner{margin:0 16px 12px;padding:10px 12px;border-radius:var(--r);font-size:13px;display:none;line-height:1.4}
+.banner.show{display:block}
+.banner.defense{background:rgba(255,138,42,.12);border:1px solid rgba(255,138,42,.5);color:var(--accent)}
+.banner.halt{background:rgba(240,84,79,.12);border:1px solid rgba(240,84,79,.55);color:var(--down)}
+
+main{padding:0 16px;max-width:560px;margin:0 auto}
+.view{display:none}
+.view.active{display:block;animation:in .18s ease}
+@keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.view.active{animation:none}}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+.label{font-size:11px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;font-weight:600}
+h2.label{margin:18px 2px 8px}
+
+/* equity */
+.equity{font-family:var(--mono);font-weight:600;font-size:38px;letter-spacing:-.01em;margin-top:6px}
+.dayline{display:flex;gap:10px;align-items:baseline;margin-top:4px;font-family:var(--mono);font-size:14px}
+.up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--muted)}
+.subtle{color:var(--muted);font-size:12px}
+
+/* risk rail — signature */
+.rail-wrap{margin-top:16px}
+.rail-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:6px}
+.rail-labels .halt{color:var(--down)} .rail-labels .goal{color:var(--up)}
+.rail{position:relative;height:14px;border-radius:999px;border:1px solid var(--line);overflow:hidden;background:var(--panel2)}
+.rail .zone-halt{position:absolute;inset:0;width:var(--haltw,33.3%);
+  background:repeating-linear-gradient(-45deg,rgba(240,84,79,.28) 0 6px,rgba(240,84,79,.10) 6px 12px)}
+.rail .zone-goal{position:absolute;top:0;bottom:0;right:0;width:2px;background:var(--up)}
+.rail .zero{position:absolute;top:0;bottom:0;left:var(--haltw,33.3%);width:1px;background:var(--dim)}
+.rail .marker{position:absolute;top:-3px;bottom:-3px;width:4px;border-radius:2px;background:var(--ink);
+  left:0;transform:translateX(-2px);transition:left .5s cubic-bezier(.2,.8,.2,1);box-shadow:0 0 0 3px rgba(234,230,217,.15)}
+
+/* positions & signals */
+.rowcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin-bottom:10px}
+.rowtop{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.tk{font-family:var(--mono);font-weight:600;font-size:16px}
+.chip{font-family:var(--mono);font-size:10px;letter-spacing:.06em;padding:3px 7px;border-radius:6px}
+.chip.call{background:rgba(82,217,139,.14);color:var(--up)}
+.chip.put{background:rgba(240,84,79,.14);color:var(--down)}
+.score{font-family:var(--mono);font-size:13px;border:1px solid var(--line);border-radius:8px;padding:3px 8px;color:var(--ink)}
+.contract{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:6px;word-break:break-all}
+.reason{font-size:13px;line-height:1.45;margin-top:6px;color:var(--ink)}
+.setup{color:var(--accent);font-weight:600;font-size:12.5px;margin-top:6px}
+.numline{display:flex;gap:14px;font-family:var(--mono);font-size:12.5px;margin-top:8px;flex-wrap:wrap}
+.numline b{font-weight:600}
+.pbar{height:5px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);margin-top:10px;position:relative;overflow:hidden}
+.pbar i{position:absolute;top:0;bottom:0;left:0;background:var(--accent);border-radius:999px;transition:width .4s}
+.btnrow{display:flex;gap:8px;margin-top:12px}
+.btn{flex:1;text-align:center;padding:11px 12px;border-radius:var(--r);font-weight:700;font-size:13.5px;letter-spacing:.03em}
+.btn.solid{background:var(--accent);color:var(--accent-ink)}
+.btn.ghost{border:1px solid var(--line);color:var(--muted)}
+.btn.danger{border:1px solid rgba(240,84,79,.6);color:var(--down)}
+.btn:active{transform:scale(.98)}
+.btn[disabled]{opacity:.45}
+
+/* mode select */
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-top:10px}
+.seg button{flex:1;padding:11px 4px;font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.02em}
+.seg button.on{background:var(--accent);color:var(--accent-ink)}
+.seg button.lock{opacity:.4}
+
+/* stats strip */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:10px 8px;text-align:center}
+.stat .v{font-family:var(--mono);font-weight:600;font-size:15px}
+.stat .k{font-size:9.5px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;margin-top:3px}
+
+/* trades list */
+.trow{display:flex;justify-content:space-between;gap:8px;padding:11px 2px;border-bottom:1px solid var(--line);font-size:13px;align-items:center}
+.trow:last-child{border-bottom:none}
+.trow .l1{font-family:var(--mono);font-weight:600}
+.trow .l2{font-size:11px;color:var(--muted);margin-top:2px}
+.trow .pnl{font-family:var(--mono);font-weight:600;text-align:right}
+.tag{font-size:9.5px;letter-spacing:.06em;color:var(--dim);text-transform:uppercase}
+
+/* rules */
+.field{margin-bottom:12px}
+.field label{display:block;font-size:11.5px;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;text-transform:uppercase;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.switch{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px}
+.tog{width:46px;height:27px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);position:relative;transition:.2s}
+.tog i{position:absolute;top:2px;left:2px;width:21px;height:21px;border-radius:50%;background:var(--muted);transition:.2s}
+.tog.on{background:var(--accent);border-color:var(--accent)}
+.tog.on i{left:21px;background:var(--accent-ink)}
+
+/* log */
+.lrow{display:flex;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line)}
+.lrow:last-child{border-bottom:none}
+.lbar{width:3px;border-radius:2px;background:var(--dim);flex:none}
+.lbar.warn{background:var(--accent)} .lbar.error{background:var(--down)} .lbar.trade{background:var(--up)}
+.levent{font-family:var(--mono);font-size:12.5px;font-weight:600}
+.ldetail{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.4;word-break:break-word}
+.ltime{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:3px}
+
+.empty{border:1px dashed var(--line);border-radius:var(--r);padding:22px 16px;text-align:center;color:var(--muted);font-size:13px;line-height:1.5}
+
+/* tabbar */
+nav{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(13,22,19,.94);backdrop-filter:blur(12px);
+  border-top:1px solid var(--line);display:flex;padding:8px 8px calc(8px + env(safe-area-inset-bottom))}
+nav button{flex:1;padding:9px 2px;font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--dim);border-radius:10px}
+nav button.on{color:var(--accent)}
+nav button .ic{display:block;font-family:var(--mono);font-size:15px;margin-bottom:2px;font-weight:600}
+
+/* toast */
+#toast{position:fixed;left:16px;right:16px;bottom:calc(96px + env(safe-area-inset-bottom));z-index:40;
+  background:var(--panel2);border:1px solid var(--accent);color:var(--ink);border-radius:var(--r);
+  padding:12px 14px;font-size:13px;line-height:1.4;display:none;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+#toast.show{display:block;animation:in .15s ease}
+.spin{display:inline-block;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">DAY<span>TRADER</span></div>
+  <div class="hdr-right">
+    <div class="pill mono" id="mktPill">MKT —</div>
+    <div class="pill" id="modePill">SIGNALS ONLY</div>
+  </div>
+</header>
+
+<div class="banner defense" id="bDefense">Daily goal hit — defense mode. New entries paused unless allowed in Rules.</div>
+<div class="banner halt" id="bHalt">Halted for the day — daily max loss reached. Resets at next session.</div>
+<div class="banner halt" id="bKill">Kill switch is ON. Nothing trades until you turn it off in Rules.</div>
+
+<main>
+
+  <!-- TODAY -->
+  <section class="view active" id="v-today">
+    <div class="card">
+      <div class="label">Paper account equity</div>
+      <div class="equity mono" id="equity">$—</div>
+      <div class="dayline"><span id="dayPnl" class="flat">—</span><span class="subtle" id="dayDate"></span></div>
+      <div class="rail-wrap">
+        <div class="rail-labels"><span class="halt" id="railLo">−2% HALT</span><span>0</span><span class="goal" id="railHi">+4% GOAL</span></div>
+        <div class="rail" id="rail"><div class="zone-halt"></div><div class="zero"></div><div class="zone-goal"></div><div class="marker" id="railMark"></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Mode</div>
+      <div class="seg" id="modeSeg">
+        <button data-mode="signals">SIGNALS ONLY</button>
+        <button data-mode="paper_auto">PAPER AUTO</button>
+        <button data-mode="live" class="lock">LIVE 🔒</button>
+      </div>
+      <div class="subtle" style="margin-top:8px" id="modeHint"></div>
+    </div>
+
+    <h2 class="label">Open positions</h2>
+    <div id="positions"></div>
+
+    <div class="btnrow">
+      <button class="btn ghost" id="btnScan">Run scan now</button>
+      <button class="btn danger" id="btnKill">Kill switch</button>
+    </div>
+  </section>
+
+  <!-- SIGNALS -->
+  <section class="view" id="v-signals">
+    <h2 class="label">Pending signals</h2>
+    <div id="sigPending"></div>
+    <h2 class="label">Earlier</h2>
+    <div id="sigHistory"></div>
+  </section>
+
+  <!-- TRADES -->
+  <section class="view" id="v-trades">
+    <div class="stats" id="stats"></div>
+    <div class="card" id="tradeList"></div>
+  </section>
+
+  <!-- RULES -->
+  <section class="view" id="v-rules">
+    <div class="card">
+      <div class="grid2">
+        <div class="field"><label>Risk / trade %</label><input class="mono" id="f_risk" type="number" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label>Max contracts</label><input class="mono" id="f_maxc" type="number" inputmode="numeric"></div>
+        <div class="field"><label>Target % (premium)</label><input class="mono" id="f_target" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Stop % (premium)</label><input class="mono" id="f_stop" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Trail arms at +%</label><input class="mono" id="f_arm" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Trail gap %</label><input class="mono" id="f_gap" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Daily goal %</label><input class="mono" id="f_goal" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Daily max loss %</label><input class="mono" id="f_maxloss" type="number" inputmode="decimal"></div>
+        <div class="field"><label>Max trades / day</label><input class="mono" id="f_maxt" type="number" inputmode="numeric"></div>
+        <div class="field"><label>Min signal score</label><input class="mono" id="f_minscore" type="number" inputmode="numeric"></div>
+      </div>
+      <div class="field"><label>Watchlist (comma separated)</label><input class="mono" id="f_watch"></div>
+      <div class="field"><label>Flatten time (ET)</label><input class="mono" id="f_flat" placeholder="15:45"></div>
+      <div class="switch"><span>Allow entries after goal hit<br><span class="subtle">Half size, tighter stop</span></span><div class="tog" id="t_defense"><i></i></div></div>
+      <div class="switch"><span>Kill switch<br><span class="subtle">Flattens and freezes everything</span></span><div class="tog" id="t_kill"><i></i></div></div>
+      <button class="btn solid" style="width:100%;margin-top:14px" id="btnSave">Save rules</button>
+    </div>
+
+    <h2 class="label">Diagnostics</h2>
+    <div class="btnrow" style="margin-top:0">
+      <button class="btn ghost" id="btnStatus">Test connection</button>
+      <button class="btn ghost" id="btnTick">Engine tick</button>
+    </div>
+    <div class="btnrow">
+      <button class="btn danger" id="btnFlatten">Flatten all positions</button>
+    </div>
+    <div class="subtle" style="margin:10px 2px;line-height:1.5">Live mode unlocks after 30+ trading days of profitable paper results. The agent's job first is to prove it deserves real money.</div>
+  </section>
+
+  <!-- LOG -->
+  <section class="view" id="v-log">
+    <div class="card" id="logList"></div>
+  </section>
+
+</main>
+
+<nav>
+  <button data-v="today" class="on"><span class="ic">◉</span>Today</button>
+  <button data-v="signals"><span class="ic">≡</span>Signals</button>
+  <button data-v="trades"><span class="ic">$</span>Trades</button>
+  <button data-v="rules"><span class="ic">⚙</span>Rules</button>
+  <button data-v="log"><span class="ic">▤</span>Log</button>
+</nav>
+
+<div id="toast"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const SUPABASE_URL = 'https://yvkpvjxxibtwdcagksci.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl2a3B2anh4aWJ0d2RjYWdrc2NpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNzYyMjksImV4cCI6MjA5Nzc1MjIyOX0.QIiqR75UpOcNRHIuFBdiGnvC5wPYBW9ZJ8iyPdHGor4';
+const FN = SUPABASE_URL + '/functions/v1/trader';
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const S = { settings:null, daily:null, signals:[], trades:[], logs:[] };
+const $ = id => document.getElementById(id);
+const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const money = n => '$' + Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const signed = n => (n>=0?'+':'') + Number(n).toFixed(2);
+const cls = n => n>0?'up':(n<0?'down':'flat');
+const etDate = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}).format(new Date());
+const ago = t => { const s=(Date.now()-new Date(t))/1e3; if(s<90)return Math.round(s)+'s'; if(s<5400)return Math.round(s/60)+'m'; if(s<172800)return Math.round(s/3600)+'h'; return Math.round(s/86400)+'d'; };
+
+let toastT;
+function toast(msg, ms=3200){ const t=$('toast'); t.innerHTML=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),ms); }
+
+async function callFn(task, extra={}, btn){
+  let old; if(btn){ old=btn.innerHTML; btn.innerHTML='<span class="spin">◌</span>'; btn.disabled=true; }
+  try{
+    const r = await fetch(FN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task,...extra})});
+    const j = await r.json().catch(()=>({ok:false,error:'bad response'}));
+    return j;
+  }catch(e){ return {ok:false,error:String(e)}; }
+  finally{ if(btn){ btn.innerHTML=old; btn.disabled=false; } }
+}
+
+/* ================= LOAD ================= */
+async function loadAll(){
+  const today = etDate();
+  const [st, dy, sg, tr, lg] = await Promise.all([
+    db.from('dt_settings').select('*').eq('id',1).single(),
+    db.from('dt_daily_stats').select('*').eq('trade_date',today).maybeSingle(),
+    db.from('dt_signals').select('*').order('created_at',{ascending:false}).limit(30),
+    db.from('dt_trades').select('*').order('created_at',{ascending:false}).limit(120),
+    db.from('dt_agent_log').select('*').order('id',{ascending:false}).limit(80)
+  ]);
+  S.settings = st.data; S.daily = dy.data; S.signals = sg.data||[]; S.trades = tr.data||[]; S.logs = lg.data||[];
+  renderAll();
+}
+
+/* ================= RENDER ================= */
+function renderAll(){ renderHeader(); renderToday(); renderSignals(); renderTrades(); renderRules(); renderLog(); }
+
+function renderHeader(){
+  const st=S.settings, d=S.daily;
+  const pill=$('modePill');
+  if(st?.kill_switch){ pill.textContent='KILL SWITCH'; pill.className='pill halted'; }
+  else if(d?.halted){ pill.textContent='HALTED'; pill.className='pill halted'; }
+  else if(st?.mode==='paper_auto'){ pill.textContent='AUTO · PAPER'; pill.className='pill auto'; }
+  else { pill.textContent='SIGNALS ONLY'; pill.className='pill'; }
+  $('bDefense').classList.toggle('show', !!d?.goal_hit && !d?.halted && !st?.kill_switch);
+  $('bHalt').classList.toggle('show', !!d?.halted);
+  $('bKill').classList.toggle('show', !!st?.kill_switch);
+}
+
+function renderToday(){
+  const st=S.settings, d=S.daily;
+  $('dayDate').textContent = etDate() + ' ET';
+  if(d){
+    $('equity').textContent = money(d.current_equity ?? d.starting_equity);
+    const p = Number(d.pnl||0), pp = Number(d.pnl_pct||0);
+    const el=$('dayPnl'); el.className=cls(p); el.textContent = `${signed(p).replace(/^([+-])/,'$1$')}  ${signed(pp)}% today`;
+  } else {
+    $('equity').textContent='$—';
+    const el=$('dayPnl'); el.className='flat'; el.textContent='No session yet today';
+  }
+  // risk rail
+  const lo = Number(st?.daily_max_loss_pct||2), hi = Number(st?.daily_goal_pct||4);
+  $('railLo').textContent = `−${lo}% HALT`; $('railHi').textContent = `+${hi}% GOAL`;
+  const haltw = lo/(lo+hi)*100;
+  $('rail').style.setProperty('--haltw', haltw+'%');
+  const pp = Number(d?.pnl_pct||0);
+  const pos = Math.max(0, Math.min(100, (pp+lo)/(lo+hi)*100));
+  $('railMark').style.left = pos+'%';
+  // mode seg
+  document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('on', st?.mode===b.dataset.mode));
+  $('modeHint').textContent = st?.mode==='paper_auto'
+    ? 'Agent enters and exits on its own in the paper account.'
+    : 'Agent researches and alerts. You approve each entry from Signals.';
+  // positions
+  const open = S.trades.filter(t=>t.status==='open');
+  $('positions').innerHTML = open.length ? open.map(posCard).join('') :
+    `<div class="empty">Flat. No open positions.<br>Scans run 8:00 & 1:00 ET on market days — or run one now.</div>`;
+}
+
+function posCard(t){
+  const entry=Number(t.entry_price||0), last=Number(t.last_price||entry), stop=Number(t.stop_price||0), tgt=Number(t.target_price||1);
+  const pp = entry>0 ? (last/entry-1)*100 : 0;
+  const prog = Math.max(0,Math.min(100,(last-stop)/((tgt-stop)||1)*100));
+  return `<div class="rowcard">
+    <div class="rowtop"><span class="tk">${esc(t.symbol)} <span class="chip ${t.direction}">${esc(t.direction).toUpperCase()}</span></span>
+      <span class="mono ${cls(pp)}" style="font-weight:600">${signed(pp)}%</span></div>
+    <div class="contract">${esc(t.contract)} · ${t.qty}x${t.filled?'':' · fill pending'}</div>
+    <div class="numline"><span>in <b>${money(entry)}</b></span><span>now <b>${money(last)}</b></span><span class="down">stop ${money(stop)}</span><span class="up">tgt ${money(tgt)}</span></div>
+    <div class="pbar"><i style="width:${prog}%"></i></div>
+  </div>`;
+}
+
+function renderSignals(){
+  const pend = S.signals.filter(s=>s.status==='pending');
+  const hist = S.signals.filter(s=>s.status!=='pending').slice(0,12);
+  $('sigPending').innerHTML = pend.length ? pend.map(s=>sigCard(s,true)).join('') :
+    `<div class="empty">No pending signals.<br>The research desk posts here when it finds a defensible setup — an empty desk is a valid answer.</div>`;
+  $('sigHistory').innerHTML = hist.length ? hist.map(s=>sigCard(s,false)).join('') : `<div class="empty">Nothing yet.</div>`;
+}
+
+function sigCard(s, actions){
+  return `<div class="rowcard">
+    <div class="rowtop"><span class="tk">${esc(s.ticker)} <span class="chip ${s.direction}">${esc(s.direction).toUpperCase()}</span></span><span class="score">${s.score??'—'}</span></div>
+    ${s.setup?`<div class="setup">${esc(s.setup)}</div>`:''}
+    ${s.reasoning?`<div class="reason">${esc(s.reasoning)}</div>`:''}
+    <div class="contract">${esc(s.contract_symbol||'—')} · ~${money(s.entry_premium)} · ${ago(s.created_at)} ago${actions?'':' · <span class="tag">'+esc(s.status)+'</span>'}</div>
+    ${actions?`<div class="btnrow">
+      <button class="btn solid" onclick="takeSignal('${s.id}',this)">Take trade</button>
+      <button class="btn ghost" onclick="skipSignal('${s.id}',this)">Skip</button>
+    </div>`:''}
+  </div>`;
+}
+
+async function takeSignal(id,btn){
+  const j = await callFn('take_signal',{signal_id:id},btn);
+  toast(j.ok ? `Order in — ${j.qty} contract(s) @ ${money(j.entry)}` : `Couldn't enter: ${esc(j.error||j.why||'unknown')}`);
+  loadAll();
+}
+async function skipSignal(id,btn){ await callFn('skip_signal',{signal_id:id},btn); loadAll(); }
+
+function renderTrades(){
+  const closed = S.trades.filter(t=>t.status==='closed');
+  const wins = closed.filter(t=>Number(t.pnl)>0), losses = closed.filter(t=>Number(t.pnl)<=0);
+  const tot = closed.reduce((a,t)=>a+Number(t.pnl||0),0);
+  const avgW = wins.length? wins.reduce((a,t)=>a+Number(t.pnl),0)/wins.length : 0;
+  const avgL = losses.length? losses.reduce((a,t)=>a+Number(t.pnl),0)/losses.length : 0;
+  const wr = closed.length? Math.round(wins.length/closed.length*100) : 0;
+  $('stats').innerHTML = `
+    <div class="stat"><div class="v">${closed.length?wr+'%':'—'}</div><div class="k">Win rate</div></div>
+    <div class="stat"><div class="v up">${wins.length?signed(avgW).replace(/^\+/,'+$'):'—'}</div><div class="k">Avg win</div></div>
+    <div class="stat"><div class="v down">${losses.length?'−$'+Math.abs(avgL).toFixed(2):'—'}</div><div class="k">Avg loss</div></div>
+    <div class="stat"><div class="v ${cls(tot)}">${closed.length?signed(tot).replace(/^([+-])/,'$1$'):'—'}</div><div class="k">Total P&L</div></div>`;
+  $('tradeList').innerHTML = closed.length ? closed.map(t=>`
+    <div class="trow">
+      <div><div class="l1">${esc(t.symbol)} ${esc(t.direction).toUpperCase()} ×${t.qty}</div>
+      <div class="l2">${money(t.entry_price)} → ${money(t.exit_price)} · <span class="tag">${esc(t.exit_reason||'')}</span> · ${ago(t.closed_at||t.created_at)} ago</div></div>
+      <div class="pnl ${cls(Number(t.pnl))}">${signed(Number(t.pnl||0)).replace(/^([+-])/,'$1$')}<br><span class="tag">${signed(Number(t.pnl_pct||0))}%</span></div>
+    </div>`).join('') : `<div class="empty">No closed trades yet. The blotter fills in as the agent works.</div>`;
+}
+
+function renderRules(){
+  const st=S.settings; if(!st) return;
+  $('f_risk').value=st.risk_per_trade_pct; $('f_maxc').value=st.max_contracts;
+  $('f_target').value=st.target_pct; $('f_stop').value=st.stop_pct;
+  $('f_arm').value=st.trail_arm_pct; $('f_gap').value=st.trail_gap_pct;
+  $('f_goal').value=st.daily_goal_pct; $('f_maxloss').value=st.daily_max_loss_pct;
+  $('f_maxt').value=st.max_trades_per_day; $('f_minscore').value=st.min_signal_score;
+  $('f_watch').value=(st.watchlist||[]).join(', '); $('f_flat').value=st.flatten_time_et;
+  $('t_defense').classList.toggle('on', !!st.defense_new_entries);
+  $('t_kill').classList.toggle('on', !!st.kill_switch);
+}
+
+async function saveRules(btn){
+  const patch = {
+    risk_per_trade_pct:+$('f_risk').value, max_contracts:+$('f_maxc').value,
+    target_pct:+$('f_target').value, stop_pct:+$('f_stop').value,
+    trail_arm_pct:+$('f_arm').value, trail_gap_pct:+$('f_gap').value,
+    daily_goal_pct:+$('f_goal').value, daily_max_loss_pct:+$('f_maxloss').value,
+    max_trades_per_day:+$('f_maxt').value, min_signal_score:+$('f_minscore').value,
+    watchlist: $('f_watch').value.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean),
+    flatten_time_et: $('f_flat').value.trim()||'15:45',
+    defense_new_entries: $('t_defense').classList.contains('on'),
+    kill_switch: $('t_kill').classList.contains('on'),
+    updated_at: new Date().toISOString()
+  };
+  const {error} = await db.from('dt_settings').update(patch).eq('id',1);
+  toast(error? 'Save failed: '+esc(error.message) : 'Rules saved');
+  loadAll();
+}
+
+function renderLog(){
+  $('logList').innerHTML = S.logs.length ? S.logs.map(l=>`
+    <div class="lrow"><div class="lbar ${esc(l.level)}"></div>
+      <div><div class="levent">${esc(l.event)}</div>
+      ${l.detail?`<div class="ldetail">${esc(l.detail)}</div>`:''}
+      <div class="ltime">${ago(l.ts)} ago</div></div></div>`).join('')
+    : `<div class="empty">Log is empty. Every scan, entry, exit and breaker lands here.</div>`;
+}
+
+/* ================= ACTIONS ================= */
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='v-'+b.dataset.v));
+});
+
+document.querySelectorAll('#modeSeg button').forEach(b=>b.onclick=async ()=>{
+  const m=b.dataset.mode;
+  if(m==='live'){ toast('Live is locked until 30+ profitable paper days. Prove it on paper first.'); return; }
+  await db.from('dt_settings').update({mode:m}).eq('id',1);
+  toast(m==='paper_auto' ? 'AUTO ON — agent will trade the paper account' : 'Signals only — you approve every entry');
+  loadAll();
+});
+
+$('btnSave').onclick = e=>saveRules(e.target);
+$('btnScan').onclick = async e=>{ toast('Research desk running…',6000); const j=await callFn('scan',{},e.target); toast(j.ok?`Scan done — ${j.signals} signal(s)`:'Scan issue: '+esc(j.error||'see Log')); loadAll(); };
+$('btnTick').onclick = async e=>{ const j=await callFn('engine',{},e.target); toast(j.ok?(j.market==='closed'?'Market closed — engine idle':'Engine tick done'):'Engine issue: '+esc(j.error||'see Log')); loadAll(); };
+$('btnStatus').onclick = async e=>{
+  const j=await callFn('status',{},e.target);
+  if(j.ok) toast(`Connected ✓ Equity ${money(j.equity)} · options level ${j.options_trading_level??'—'} · market ${j.market_open?'OPEN':'closed'} · Claude key ${j.anthropic_key?'✓':'MISSING'}`,6000);
+  else toast('Not connected: '+esc(j.error||'check secrets'),6000);
+  $('mktPill').textContent = j.ok ? ('MKT '+(j.market_open?'OPEN':'CLOSED')) : 'MKT —';
+};
+$('btnFlatten').onclick = async e=>{ if(!confirm('Close ALL open positions right now?'))return; await callFn('flatten',{},e.target); toast('Flattened.'); loadAll(); };
+$('btnKill').onclick = async e=>{
+  if(!confirm('KILL SWITCH: flatten everything and freeze the agent?'))return;
+  await db.from('dt_settings').update({kill_switch:true}).eq('id',1);
+  await callFn('flatten',{});
+  toast('Kill switch ON. Re-enable in Rules when ready.');
+  loadAll();
+};
+$('t_defense').onclick = ()=>$('t_defense').classList.toggle('on');
+$('t_kill').onclick = ()=>$('t_kill').classList.toggle('on');
+
+/* ================= REALTIME ================= */
+db.channel('dt-live')
+  .on('postgres_changes',{event:'*',schema:'public',table:'dt_signals'},()=>loadAll())
+  .on('postgres_changes',{event:'*',schema:'public',table:'dt_trades'},()=>loadAll())
+  .on('postgres_changes',{event:'*',schema:'public',table:'dt_daily_stats'},()=>loadAll())
+  .on('postgres_changes',{event:'*',schema:'public',table:'dt_agent_log'},()=>loadAll())
+  .subscribe();
+
+setInterval(loadAll, 60000);
+loadAll();
+callFn('status').then(j=>{ if(j.ok) $('mktPill').textContent='MKT '+(j.market_open?'OPEN':'CLOSED'); });
+</script>
+</body>
+</html>
