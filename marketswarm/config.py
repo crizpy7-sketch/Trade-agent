@@ -87,10 +87,19 @@ class Config:
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
         cfg = cls()
+        default_reports = cfg.report_dir
+
         p = Path(path).expanduser() if path else DEFAULT_CONFIG_PATH
         if p.exists():
             cfg._apply_file(p)
         cfg._apply_env()
+
+        # Relocating the data directory must take the reports with it. Without
+        # this, setting only MARKETSWARM_DATA_DIR silently leaves reports in
+        # the home directory — where a sandboxed service cannot write them.
+        if cfg.report_dir == default_reports and cfg.data_dir != Config().data_dir:
+            cfg.report_dir = cfg.data_dir / "reports"
+
         cfg.ensure_dirs()
         return cfg
 

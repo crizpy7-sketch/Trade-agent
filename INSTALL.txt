@@ -1,0 +1,136 @@
+MarketSwarm — installing from the zip on a VPS
+==============================================
+
+Research and educational software. Nothing it produces is financial advice.
+
+
+1. Upload and extract
+---------------------
+
+From your local machine:
+
+    scp marketswarm-1.0.0.zip user@your-vps:~/
+
+Then on the VPS:
+
+    unzip marketswarm-1.0.0.zip
+    cd marketswarm-1.0.0
+
+
+2. Install as a service (Debian/Ubuntu)
+---------------------------------------
+
+    sudo ./deploy/install.sh
+
+This creates a `marketswarm` system user, builds a virtualenv in
+/opt/marketswarm, installs a hardened systemd unit, and writes a config
+template to /etc/marketswarm/env.
+
+Then edit the config:
+
+    sudo nano /etc/marketswarm/env
+
+The only line you MUST change:
+
+    MARKETSWARM_CONTACT=you@example.com
+
+The SEC requires a declared contact address and throttles or blocks clients
+that do not identify themselves. Everything else is optional.
+
+Check it is working, then start it:
+
+    sudo -u marketswarm /opt/marketswarm/venv/bin/marketswarm status
+    sudo systemctl start marketswarm
+    sudo journalctl -u marketswarm -f
+
+
+3. Or run it with Docker
+------------------------
+
+    cp .env.example .env
+    nano .env
+    docker compose -f deploy/docker-compose.yml up -d
+    docker compose -f deploy/docker-compose.yml logs -f
+
+
+4. Or just run it by hand
+-------------------------
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    pip install -e .
+
+    export MARKETSWARM_CONTACT=you@example.com
+    marketswarm status
+    marketswarm run
+
+
+What it does once running
+-------------------------
+
+The daemon wakes at 08:15 ET on trading days, runs the fifteen-agent research
+pass, and writes a report to:
+
+    /var/lib/marketswarm/reports/           (systemd)
+    the marketswarm-data volume, /data      (docker)
+
+`latest.html` is always the most recent report — point a web server at it or
+just scp it down.
+
+After the close it runs the scoring pass, resolves the morning's ideas against
+real intraday bars, and updates its own weights and calibration. It gets more
+honest over time, not more confident.
+
+It does nothing at all on weekends and market holidays. It computes the NYSE
+calendar itself, so this works with no network and no calendar service.
+
+
+Useful commands
+---------------
+
+    marketswarm run                  research pass now
+    marketswarm run --force          run even when the market is closed (testing)
+    marketswarm score                resolve past ideas and learn from them
+    marketswarm calibration          your track record and reliability curve
+    marketswarm status               session, config, integrations
+    marketswarm holidays 2026        market closures
+
+Under systemd, prefix these with:
+
+    sudo -u marketswarm /opt/marketswarm/venv/bin/
+
+
+Optional integrations
+---------------------
+
+None of these are required; the agent runs fully without them.
+
+    ANTHROPIC_API_KEY     adds a written narrative and scoring post-mortems.
+                          The numbers never come from a language model.
+    FRED_API_KEY          adds authoritative macro series (free key from
+                          https://fredaccount.stlouisfed.org/apikeys)
+    MARKETSWARM_WEBHOOK   pushes the morning summary to Discord or Slack
+
+
+Backing it up
+-------------
+
+Everything the agent has learned lives in one file:
+
+    /var/lib/marketswarm/memory.db
+
+Copy that and you keep its entire track record, calibration and learned
+weights. Losing it does not break the agent — it just starts learning again
+from zero.
+
+
+Verifying the install
+---------------------
+
+    pip install pytest pytest-asyncio
+    pytest -q
+
+67 tests, no network required.
+
+See README.md for how the statistics work and where the limitations are.
