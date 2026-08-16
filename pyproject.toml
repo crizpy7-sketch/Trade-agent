@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marketswarm"
+version = "1.0.0"
+description = "Autonomous pre-market intelligence swarm with Bayesian evidence fusion and self-calibration"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "PyYAML>=6.0",
+    "python-dateutil>=2.9",
+    "feedparser>=6.0",
+    "rich>=13.7",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+marketswarm = "marketswarm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["marketswarm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,43 @@
+[Unit]
+Description=MarketSwarm pre-market intelligence agent
+Documentation=https://github.com/crizpy7-sketch/trade-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marketswarm
+Group=marketswarm
+WorkingDirectory=/opt/marketswarm
+Environment=PYTHONUNBUFFERED=1
+Environment=MARKETSWARM_DATA_DIR=/var/lib/marketswarm
+Environment=MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
+EnvironmentFile=-/etc/marketswarm/env
+ExecStart=/opt/marketswarm/venv/bin/marketswarm daemon --verbose
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+
+# The agent reads public data and writes one directory. Nothing else is needed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/marketswarm
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=marketswarm
+
+[Install]
+WantedBy=multi-user.target

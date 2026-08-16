@@ -1,0 +1,29 @@
+services:
+  marketswarm:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: marketswarm:latest
+    container_name: marketswarm
+    restart: unless-stopped
+    environment:
+      # Required: SEC EDGAR blocks clients that do not identify themselves.
+      MARKETSWARM_CONTACT: ${MARKETSWARM_CONTACT:?set MARKETSWARM_CONTACT in .env}
+      # Optional integrations.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      MARKETSWARM_WEBHOOK: ${MARKETSWARM_WEBHOOK:-}
+      MARKETSWARM_RUN_TIME: ${MARKETSWARM_RUN_TIME:-08:15}
+      MARKETSWARM_UNIVERSE: ${MARKETSWARM_UNIVERSE:-}
+      TZ: America/New_York
+    volumes:
+      - marketswarm-data:/data
+    command: ["daemon", "--verbose"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  marketswarm-data:
