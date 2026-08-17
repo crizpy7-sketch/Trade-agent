@@ -21,6 +21,14 @@ def summarize(result) -> str:
     if vr and vr.usable:
         lines.append(f"Regime: {vr.data.get('regime', 'unknown').replace('_', ' ')}")
 
+    pub = getattr(result, "publication", None)
+    if pub is not None and pub.suppressed:
+        lines.append(f"\n__No recommendations published__\n{pub.suppression_reason}")
+        lines.append("\n_Research/educational analysis only — not financial advice._")
+        text = "\n".join(lines)
+        return text[:MAX_LEN] + ("…" if len(text) > MAX_LEN else "")
+
+    # Reads the derived view, so a rejected candidate cannot be notified.
     for label, key in (("Calls", "calls"), ("Puts", "puts"), ("Stocks", "stocks")):
         ideas = (result.ideas or {}).get(key, [])
         if not ideas:
@@ -58,6 +66,10 @@ def send_webhook(url: str, text: str, timeout: float = 15.0) -> bool:
 
 def should_notify(result, policy: str) -> bool:
     if policy == "never":
+        return False
+    pub = getattr(result, "publication", None)
+    if pub is not None and pub.suppressed and policy == "high_confidence":
+        # Nothing was published, so there is no high-confidence idea to send.
         return False
     if policy == "high_confidence":
         return result.confidence >= 60 and bool(

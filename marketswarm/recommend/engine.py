@@ -123,6 +123,20 @@ class Recommendation:
     model_version: str = ""
     system_version: str = ""
     experiment_id: str | None = None
+
+    # Lineage. Written once, never recomputed, so a published recommendation
+    # can always be traced back to the candidate and review that produced it.
+    candidate_id: str | None = None
+    evidence_graph_id: str | None = None
+    review_decision_id: str | None = None
+    revision_parent_id: str | None = None
+
+    # Presentation only. Carries the option strike, expiration and premium
+    # zones the engine has no opinion about. Every decision-bearing field in
+    # here is overwritten from this object by `publication._payload_from`, so
+    # it can never become a second source of truth for confidence or levels.
+    source_kind: str | None = None            # call | put | stock
+    source_payload: dict = field(default_factory=dict)
     created_at: str = field(
         default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat()
     )

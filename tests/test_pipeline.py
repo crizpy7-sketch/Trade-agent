@@ -20,7 +20,8 @@ from marketswarm.orchestrator import SwarmResult, stage_agents
 from marketswarm.report import render_html, render_markdown
 from marketswarm.stats.calibration import PlattCalibrator
 
-from .fakes import FakeEarnings, FakeEcon, FakeEdgar, FakeMarket, FakeNews, FakeOptions
+from .fakes import (FakeEarnings, FakeEcon, FakeEdgar, FakeMarket, FakeNews,
+                    FakeOptions, publication_from)
 
 
 UNIVERSE = ["SPY", "QQQ", "NVDA", "AAPL", "MSFT", "AMD"]
@@ -150,12 +151,21 @@ def test_ideas_are_ranked_by_composite_score(reports):
 
 
 def test_report_renders_with_playbook_and_disclaimer(reports, tmp_path):
+    """The report renders from the reviewed publication set.
+
+    Note what this fixture actually produces: on synthetic data with thin,
+    correlated evidence the review gate and recommendation engine publish
+    *nothing actionable*. That is the designed outcome, not a broken fixture,
+    so this test asserts the structure and the honest 'considered and not
+    recommended' output rather than demanding trade cards that the evidence
+    does not support.
+    """
     reps, ctx = reports
-    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps)
+    pub = publication_from(reps, ctx.run_date, candidate_confidence=75)
+    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps,
+                         publication=pub)
     result.probability = reps["cross_verify"].data["probability"]
     result.confidence = reps["cross_verify"].data["confidence_score"]
-    pb = reps["playbook"]
-    result.ideas = {"calls": pb.data["calls"], "puts": pb.data["puts"], "stocks": pb.data["stocks"]}
 
     md = render_markdown(result)
     assert "# Day Trading Playbook" in md
@@ -163,9 +173,14 @@ def test_report_renders_with_playbook_and_disclaimer(reports, tmp_path):
     assert "2. Best Put Options" in md
     assert "3. Best Stocks for Day Trading" in md
     assert "not financial advice" in md
-    assert "Invalidated if:" in md
     for section in ("Overnight Scan", "Options Flow", "Cross-Verification", "Risk Assessment"):
         assert section in md
+
+    # Every non-actionable conclusion is still reported, with its reason.
+    assert pub.active(), "the pipeline produced no recommendations at all"
+    assert "Considered and not recommended" in md
+    for rec in pub.active():
+        assert rec.subject in md
 
     html = render_html(result)
     assert html.startswith("<!doctype html>")
@@ -302,9 +317,8 @@ def test_red_team_objections_reach_the_report(reports, tmp_path):
     rt = reps["red_team"]
     assert rt.usable and rt.data["objections"], "red team produced nothing to render"
 
-    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps)
-    pb = reps["playbook"]
-    result.ideas = {"calls": pb.data["calls"], "puts": pb.data["puts"], "stocks": pb.data["stocks"]}
+    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps,
+                         publication=publication_from(reps, ctx.run_date))
     md = render_markdown(result)
 
     assert "Red Team" in md
@@ -314,11 +328,19 @@ def test_red_team_objections_reach_the_report(reports, tmp_path):
 
 def test_demo_flag_marks_every_idea_card(reports):
     """A sample report must be unmistakable even from a screenshot of one card —
-    fake prices that look real are the most dangerous output this thing can make."""
+    fake prices that look real are the most dangerous output this thing can make.
+
+    This is a renderer test, so it needs an actionable card to render and the
+    synthetic fixture does not produce one. The approved recommendation is
+    therefore constructed directly. Building a `PublicationSet` by hand is fine
+    in a test of the renderer; what must never happen is production code doing
+    it, which `test_rejected_recommendation_can_never_reenter_publication_path`
+    covers.
+    """
     reps, ctx = reports
-    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps)
-    pb = reps["playbook"]
-    result.ideas = {"calls": pb.data["calls"], "puts": pb.data["puts"], "stocks": pb.data["stocks"]}
+    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps,
+                         publication=_publication_with_one_actionable_idea(reps))
+    assert result.ideas["calls"], "the fixture must render at least one card"
 
     plain = render_markdown(result, demo=False)
     assert "SAMPLE" not in plain
@@ -331,3 +353,31 @@ def test_demo_flag_marks_every_idea_card(reports):
     html = render_html(result, demo=True)
     assert 'class="demo-bar"' in html
     assert "position:sticky" in html
+
+
+def _publication_with_one_actionable_idea(reps):
+    """One approved, actionable recommendation carrying real option fields."""
+    from marketswarm.publication import PublicationSet
+    from marketswarm.recommend.engine import (Conviction, Recommendation,
+                                              RecommendationType)
+
+    call = (reps["playbook"].data.get("calls") or [None])[0]
+    assert call is not None, "the playbook produced no call to render"
+    return PublicationSet(approved=[Recommendation(
+        id="rec_demo_card",
+        subject=call["symbol"],
+        rec_type=RecommendationType.FAVORABLE,
+        conviction=Conviction.MODERATE_CONVICTION,
+        direction="long",
+        forecast_probability=call["probability"],
+        confidence=55, original_confidence=80,
+        expected_r=call["expected_r"],
+        entry=call["entry"], target=call["target"], stop=call["stop"],
+        rationale=call["rationale"],
+        invalidation=[call["invalidation"]],
+        review_status="APPROVE_WITH_REDUCED_CONFIDENCE",
+        source_kind="call",
+        source_payload={k: call[k] for k in
+                        ("strike", "expiration", "option_entry", "option_target",
+                         "option_stop", "ev_verdict", "clears_bar", "math_note")},
+    )])

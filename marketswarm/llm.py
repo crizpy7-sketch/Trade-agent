@@ -45,6 +45,9 @@ class Narrator:
         self.enabled = enabled and bool(api_key)
         self._client = None
 
+        from .llm_router import ModelRouter
+        self.router = ModelRouter(api_key=api_key, enabled=self.enabled)
+
     def _get_client(self):
         if self._client is not None:
             return self._client
@@ -104,9 +107,14 @@ class Narrator:
             return None
 
         payload = self.build_payload(result)
+
+        # Route the call rather than always reaching for the strongest model.
+        # A quiet session with nothing published does not need the expensive
+        # tier to say so.
+        model, routing = self._route_for(result)
         try:
             resp = client.messages.create(
-                model=self.model,
+                model=model,
                 max_tokens=1400,
                 system=SYSTEM,
                 messages=[{
@@ -116,10 +124,37 @@ class Narrator:
                 }],
             )
             parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+            if routing is not None:
+                self.router.budget.charge(routing.estimated_cost)
             return "\n\n".join(parts).strip() or None
         except Exception as exc:  # noqa: BLE001 — narrative is optional, never fatal
             log.warning("narrative generation failed: %s", exc)
             return None
+
+    def _route_for(self, result) -> tuple[str, object | None]:
+        """Choose a model tier from what the session actually contains.
+
+        Falls back to the configured model if routing is unavailable, so this
+        can never be the reason a narrative fails to generate.
+        """
+        try:
+            pub = getattr(result, "publication", None)
+            n_active = len(pub.active()) if pub else 0
+            n_rejected = len(pub.rejected) if pub else 0
+            total = max(1, n_active + n_rejected)
+
+            decision = self.router.route(
+                "narrative",
+                importance=min(1.0, n_active / 3.0),
+                uncertainty=0.5 if not pub or pub.suppressed else 0.3,
+                disagreement=n_rejected / total,
+            )
+            if decision.model_id:
+                log.info("narrative routed to %s: %s", decision.model_id, decision.reason)
+                return decision.model_id, decision
+        except Exception as exc:  # noqa: BLE001 — routing must never be fatal
+            log.debug("model routing unavailable, using the configured model: %s", exc)
+        return self.model, None
 
     def postmortem(self, calibration: dict, recent: list[dict]) -> str | None:
         """Written after scoring: what the agent got wrong and why."""

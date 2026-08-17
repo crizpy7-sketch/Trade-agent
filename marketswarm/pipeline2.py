@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import uuid
 from dataclasses import dataclass, field
 
 from .evidence.graph import (
@@ -35,6 +36,7 @@ from .evidence.graph import (
 from .investigation.chief import ChiefInvestigator
 from .investigation.event_brain import EventBrain
 from .observability import Observatory
+from .publication import PublicationSet, RejectedCandidate
 from .recommend.engine import (
     Conviction,
     Recommendation,
@@ -46,6 +48,17 @@ from .review.gate import ReviewGate
 from .review.loop import ReviewLoop, findings_from_redteam_report
 
 log = logging.getLogger("marketswarm.pipeline2")
+
+
+def _bind_investigator(investigator, symbol: str, plan):
+    """Adapt the orchestrator's investigator to the review loop's signature.
+
+    The loop calls `investigator(idea, questions)`; the orchestrator needs the
+    symbol and the parent plan to scope and budget the follow-up.
+    """
+    def follow_up(current: dict, questions: list[str]) -> dict:
+        return investigator(symbol, current, questions, plan)
+    return follow_up
 
 
 # Which evidence cluster each agent's output belongs to. Drives the
@@ -82,12 +95,14 @@ class Pipeline2Result:
     run_date: dt.date
     graph: EvidenceGraph
     recommendations: list[Recommendation] = field(default_factory=list)
-    rejected: list[dict] = field(default_factory=list)
+    rejected: list[RejectedCandidate] = field(default_factory=list)
     plans: list = field(default_factory=list)
     review_outcomes: list = field(default_factory=list)
     degradation: dict = field(default_factory=dict)
     contradictions: list[str] = field(default_factory=list)
     observability: dict = field(default_factory=dict)
+    # The authoritative output. Everything downstream reads this.
+    publication: PublicationSet = field(default_factory=PublicationSet)
 
     @property
     def actionable(self) -> list[Recommendation]:
@@ -135,7 +150,8 @@ class Pipeline2:
     # 1. snapshot for the event brain, built from reports the swarm produced
     # ------------------------------------------------------------------
 
-    def build_snapshot(self, reports: dict) -> dict:
+    @staticmethod
+    def build_snapshot(reports: dict) -> dict:
         def data(agent, key, default=None):
             r = reports.get(agent)
             return r.data.get(key, default) if r and r.usable else default
@@ -255,7 +271,9 @@ class Pipeline2:
         degradation: DegradationTracker,
         calibration_gap: float | None = None,
         prior_failures: dict[str, list[str]] | None = None,
-    ) -> tuple[list[Recommendation], list[dict], list]:
+        investigator=None,
+        plans: list | None = None,
+    ) -> tuple[list[Recommendation], list[RejectedCandidate], list]:
         pb = reports.get("playbook")
         if not pb or not pb.usable:
             return [], [], []
@@ -272,32 +290,48 @@ class Pipeline2:
                          if reports.get("cross_verify")
                          and reports["cross_verify"].usable else {})
 
-        ideas = (pb.data.get("calls", []) + pb.data.get("puts", [])
-                 + pb.data.get("stocks", []))
+        ideas = ([("call", i) for i in pb.data.get("calls", [])]
+                 + [("put", i) for i in pb.data.get("puts", [])]
+                 + [("stock", i) for i in pb.data.get("stocks", [])])
 
         recommendations: list[Recommendation] = []
-        rejected: list[dict] = []
+        rejected: list[RejectedCandidate] = []
         outcomes: list = []
+        plan_by_subject = {p.subject: p for p in (plans or [])}
 
-        for idea in ideas:
+        for kind, idea in ideas:
             symbol = idea.get("symbol", "?")
             sym_nodes = graph.by_subject(symbol) or list(graph.nodes.values())
             independent = graph.effective_independent_count(sym_nodes)
+            candidate_id = idea.get("recommendation_id") or f"cand_{uuid.uuid4().hex[:12]}"
 
             # --- the review gate, applied BEFORE publication ---
             def critic(current, iteration, _rt=rt, _sym=symbol):
                 return findings_from_redteam_report(_rt, symbol=_sym)
 
-            outcome = self.review_loop.run(dict(idea), critic=critic)
+            # A REQUEST_MORE_RESEARCH decision must buy real evidence, not just
+            # leave the questions open. The investigator is bounded by the
+            # plan's budget and is supplied by the orchestrator, which is the
+            # only layer that can actually execute agents.
+            follow_up = (
+                _bind_investigator(investigator, symbol, plan_by_subject.get(symbol))
+                if investigator is not None else None
+            )
+
+            outcome = self.review_loop.run(
+                dict(idea, recommendation_id=candidate_id),
+                critic=critic, investigator=follow_up)
             outcomes.append(outcome)
 
             if outcome.rejected:
-                rejected.append({
-                    "symbol": symbol,
-                    "reason": outcome.final_decision.summary(),
-                    "findings": outcome.final_decision.reasons,
-                    "audit": outcome.audit_trail(),
-                })
+                rejected.append(RejectedCandidate(
+                    subject=symbol,
+                    candidate_id=candidate_id,
+                    reason=outcome.final_decision.summary(),
+                    findings=list(outcome.final_decision.reasons),
+                    audit=outcome.audit_trail(),
+                    original_confidence=int(idea.get("confidence", 0)),
+                ))
                 self.obs.event("review", f"{symbol} rejected: "
                                          f"{outcome.final_decision.summary()}",
                                level="info")
@@ -333,9 +367,25 @@ class Pipeline2:
                 agent_contributors=contributions,
                 investigation_id=graph.investigation_id,
             )
-            rec.original_confidence = int(reviewed.get("original_confidence",
-                                                       rec.confidence))
+            rec.original_confidence = int(idea.get("confidence", rec.confidence))
             rec.revision_count = max(0, outcome.iterations_used - 1)
+
+            # Lineage, written once so a published call can be traced back.
+            rec.candidate_id = candidate_id
+            rec.evidence_graph_id = graph.investigation_id
+            rec.review_decision_id = outcome.final_decision.id
+            rec.review_status = outcome.final_decision.status.value
+            rec.source_kind = kind
+
+            # Presentation payload only. `publication._payload_from` overwrites
+            # every decision-bearing key from `rec`, so the strike and the
+            # expiration survive and a stale confidence cannot.
+            rec.source_payload = {
+                k: v for k, v in idea.items()
+                if k in ("strike", "expiration", "option_entry", "option_target",
+                         "option_stop", "option_note", "math_note", "ev_verdict",
+                         "clears_bar", "liquidity", "contracts", "delta")
+            }
             recommendations.append(rec)
 
         return recommendations, rejected, outcomes
@@ -346,21 +396,34 @@ class Pipeline2:
 
     def run(self, reports: dict, run_date: dt.date,
             calibration_gap: float | None = None,
-            prior_failures: dict[str, list[str]] | None = None) -> Pipeline2Result:
+            prior_failures: dict[str, list[str]] | None = None,
+            plans: list | None = None,
+            investigator=None,
+            mode: str = "dynamic") -> Pipeline2Result:
+        """Decide what may be published. The return value is authoritative.
+
+        `plans` comes from the orchestrator when the Chief Investigator has
+        already planned and routed the session — the plan must be made before
+        the specialists run, or it is not a plan. Passing None re-plans here
+        from the reports, which is only meaningful in `full` mode where
+        everything ran anyway.
+        """
         degradation = DegradationTracker()
         for name, rep in reports.items():
             degradation.record_agent(name, getattr(rep, "status", "ok"))
             self.obs.record_report(rep)
 
-        snapshot = self.build_snapshot(reports)
-        plans = self.chief.plan_session(snapshot)
-        self.obs.event("chief", f"planned {len(plans)} investigations")
+        if plans is None:
+            snapshot = self.build_snapshot(reports)
+            plans = self.chief.plan_session(snapshot)
+            self.obs.event("chief", f"planned {len(plans)} investigations (post-hoc)")
 
         graph = self.build_graph(reports)
         contradictions = self.chief.detect_contradictions(reports)
 
         recs, rejected, outcomes = self.build_recommendations(
-            reports, graph, degradation, calibration_gap, prior_failures)
+            reports, graph, degradation, calibration_gap, prior_failures,
+            investigator=investigator, plans=plans)
 
         # A critically degraded run must not publish the output class whose
         # evidence is missing. This is the "do not silently proceed" rule.
@@ -373,6 +436,15 @@ class Pipeline2:
                     r.conviction = Conviction.INSUFFICIENT_EVIDENCE
                     r.uncertainty_notes.append(degradation.missing_evidence_statement())
 
+        publication = PublicationSet(
+            approved=recs,
+            rejected=rejected,
+            mode=mode,
+            review_iterations=sum(o.iterations_used for o in outcomes),
+        )
+        # Cheap, and it is the invariant the whole release exists to protect.
+        publication.assert_no_leak()
+
         return Pipeline2Result(
             run_date=run_date,
             graph=graph,
@@ -383,4 +455,5 @@ class Pipeline2:
             degradation=degradation.summary(),
             contradictions=contradictions,
             observability=self.obs.status_snapshot(),
+            publication=publication,
         )

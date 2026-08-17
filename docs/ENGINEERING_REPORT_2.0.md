@@ -123,6 +123,13 @@ and cost budget).
 `orchestrator.py` runs Pipeline 2 inside a `try/except`. If any 2.0 layer
 fails, the run degrades to the 1.x path rather than producing nothing.
 
+> **Corrected in 2.0.1.** That last sentence described a genuine safety hole:
+> degrading to "the 1.x path" meant publishing ideas that nothing had
+> reviewed. A 2.0 failure now suppresses publication entirely. The diagram
+> above also showed the Chief Investigator selecting agents, which it did not
+> do at runtime until 2.0.1. See the addendum at the end of this document and
+> `docs/RUNTIME_CONTROL_PATH.md`.
+
 ---
 
 ## 4. Files Changed
@@ -599,3 +606,67 @@ place orders, move funds, or allocate a portfolio, and no part of this system
 should be treated as a recommendation to trade. Past performance — including
 backtested performance, which is worth considerably less — does not indicate
 future results.*
+
+---
+---
+
+# Addendum — Runtime Integration Repair (2.0.1)
+
+The report above described the 2.0 architecture accurately as a set of
+components. It described the *runtime* inaccurately. A follow-up audit traced
+the executable control path and found that several of the components this
+report celebrates were not reached by `marketswarm run`.
+
+That is a documentation failure as much as a code one, so the corrections are
+recorded here rather than quietly edited into the text above.
+
+## What §1 claimed, and what was actually true
+
+| Claim in this report | Reality before 2.0.1 |
+|---|---|
+| "The red team can now change the output… Reject means it doesn't reach you." | The gate rejected correctly and `orchestrator.py:180-185` then rebuilt the published ideas from the pre-review playbook. **Rejections did not reach the reader.** |
+| "Investigation is dynamic — a chief investigator … spends a bounded budget" | The full 16-agent DAG ran first; the Chief planned afterwards and its plan was attached to the result object. Nothing was routed, nothing was skipped, no budget was spent. |
+| "Memory is institutional … feeds a propose-only Research Scientist" | True as a capability. `ContributionTracker` and `AfterActionReviewer` appeared **nowhere** in production code, and `marketswarm score` ran only the 1.x `LearningEngine`. |
+| §5 "Contribution Scoring — ablation log-loss delta per agent" | Implemented and tested in isolation. Never called. |
+
+Every one of those components had passing unit tests throughout. That is the
+lesson worth keeping: a green suite proves a component is correct, not that it
+is reached.
+
+## What changed
+
+- `publication.py` — a single `PublicationSet` that every consumer reads.
+  `SwarmResult.ideas` became a read-only derived property, so the one-line
+  assignment that caused the leak is now an `AttributeError`.
+- `orchestrator.py` — phased execution. Scan → Event Brain → Chief → registry →
+  **only the selected specialists** → synthesis → review. Unselected agents are
+  never constructed.
+- `closed_loop.py` — after-action review, contribution scoring, memory and
+  thresholded proposals now run as part of `marketswarm score`.
+- `memory/resolver.py` — one API for next-run weights, replacing two stores
+  with no rule for choosing between them.
+- Migration 005 — `recommendations.status` plus lineage columns, and a
+  `run_control_path` table recording which architecture executed.
+
+Full detail: `docs/RUNTIME_CONTROL_PATH.md` and
+`docs/2_0_INTEGRATION_ACCEPTANCE.md`.
+
+## What did not change
+
+**§9 stands unaltered.** Deflated Sharpe is still 0.004. No gate was retuned,
+no threshold was relaxed, and no backtest was re-run to produce a friendlier
+number. Wiring the architecture correctly makes its behaviour real; it does not
+make it profitable, and nothing here should be read as evidence that it is.
+
+One consequence worth stating: now that the review gate genuinely controls
+publication, the system publishes **less**. On the synthetic test fixture it
+publishes nothing actionable at all — thin, correlated evidence plus a
+high-severity objection is a stand-aside, and the gate now says so out loud
+instead of being overruled. That is the intended behaviour and it is why
+`test_report_renders_with_playbook_and_disclaimer` asserts on the "considered
+and not recommended" table rather than on trade cards.
+
+## Tests
+
+239 → 268. All pass. The 29 additions are in `tests/test_control_path.py` and
+drive the real `Swarm.run()` rather than a mock.

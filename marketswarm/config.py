@@ -40,6 +40,14 @@ class Config:
     max_concurrent_ideas: int = 3
     min_expected_r: float = 0.0        # ideas below this are dropped
 
+    # --- orchestration ---
+    # dynamic  the Chief Investigator selects which specialists run (2.0 default)
+    # full     every agent runs, review gate still authoritative (benchmarking)
+    # legacy   1.x swarm with no review gate — analysis only unless the flag
+    #          below is also set, so it cannot become the accidental default
+    orchestration_mode: str = "dynamic"
+    allow_unreviewed_publication: bool = False
+
     # --- runtime ---
     run_time_et: str = "08:15"         # daily pre-market run
     score_time_et: str = "16:45"       # post-close learning pass

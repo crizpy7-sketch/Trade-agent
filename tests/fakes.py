@@ -218,3 +218,33 @@ class FakeEarnings:
             ],
             "counts": {"prior_amc": 1, "today_bmo": 0, "today_amc": 1},
         }
+
+
+def publication_from(reports: dict, run_date, mode: str = "dynamic",
+                     candidate_confidence: int | None = None):
+    """Build a `PublicationSet` the way production does.
+
+    Tests that need a rendered report must go through the review gate to get
+    one, exactly as the orchestrator does. There is deliberately no shortcut:
+    a test that could hand the renderer un-reviewed ideas would be testing a
+    path that no longer exists.
+
+    `candidate_confidence` raises the *pre-review* confidence of the fixture's
+    ideas so a renderer test has something to render. The review still runs in
+    full against the real red-team objections — a strong candidate that draws a
+    high-severity finding comes out reduced, not waved through.
+    """
+    import copy
+
+    from marketswarm.config import Config
+    from marketswarm.pipeline2 import Pipeline2
+
+    if candidate_confidence is not None:
+        reports = dict(reports)
+        pb = copy.deepcopy(reports["playbook"])
+        for key in ("calls", "puts", "stocks"):
+            for idea in pb.data.get(key, []) or []:
+                idea["confidence"] = candidate_confidence
+        reports["playbook"] = pb
+
+    return Pipeline2(Config()).run(reports, run_date, mode=mode).publication

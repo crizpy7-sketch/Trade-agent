@@ -125,13 +125,38 @@ class ReadOnlyAPI:
 
     # ---------- recommendations ----------
 
-    def recommendations(self, run_date: str | None = None, limit: int = 50) -> list[dict]:
+    # Only these statuses are live recommendations. Everything else — most
+    # importantly REJECTED — is history, and serving it here would reintroduce
+    # the exact bypass the review gate exists to close.
+    ACTIVE_STATUSES = ("APPROVED", "MODIFIED")
+
+    def recommendations(self, run_date: str | None = None, limit: int = 50,
+                        include_inactive: bool = False) -> list[dict]:
+        """Active recommendations. Rejected candidates are excluded by default
+        and are reachable only through `rejected()` or the audit endpoint."""
+        status_clause = "" if include_inactive else (
+            " AND status IN ({})".format(",".join("?" * len(self.ACTIVE_STATUSES))))
+        status_params = () if include_inactive else self.ACTIVE_STATUSES
+
         if run_date:
             return self._rows(
-                "SELECT * FROM recommendations WHERE run_date=? ORDER BY confidence DESC",
-                (run_date,))
+                f"SELECT * FROM recommendations WHERE run_date=?{status_clause} "
+                f"ORDER BY confidence DESC",
+                (run_date, *status_params))
         return self._rows(
-            "SELECT * FROM recommendations ORDER BY created_at DESC LIMIT ?", (limit,))
+            f"SELECT * FROM recommendations WHERE 1=1{status_clause} "
+            f"ORDER BY created_at DESC LIMIT ?",
+            (*status_params, limit))
+
+    def rejected(self, run_date: str | None = None, limit: int = 50) -> list[dict]:
+        """Review history: candidates that did not survive the gate."""
+        if run_date:
+            return self._rows(
+                "SELECT * FROM recommendations WHERE run_date=? AND status='REJECTED' "
+                "ORDER BY created_at DESC", (run_date,))
+        return self._rows(
+            "SELECT * FROM recommendations WHERE status='REJECTED' "
+            "ORDER BY created_at DESC LIMIT ?", (limit,))
 
     def recommendation(self, rec_id: str) -> dict | None:
         row = self.conn.execute(

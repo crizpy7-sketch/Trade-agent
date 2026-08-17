@@ -23,7 +23,7 @@ from .config import Config
 from .llm import Narrator
 from .memory import LearningEngine, MemoryStore
 from .notify import send_webhook, should_notify, summarize
-from .orchestrator import Swarm
+from .orchestrator import ORCHESTRATION_MODES, Swarm
 from .providers.base import DataClient
 from .providers.market import MarketData
 from .report import write_reports
@@ -69,7 +69,8 @@ async def cmd_run(args, cfg: Config) -> int:
         return 0
 
     swarm = Swarm(cfg)
-    result = await swarm.run(run_date, force=args.force)
+    result = await swarm.run(run_date, force=args.force,
+                             mode=getattr(args, 'mode', None))
 
     narrative = None
     if cfg.llm_enabled and cfg.anthropic_api_key and not args.no_llm:
@@ -86,7 +87,12 @@ async def cmd_run(args, cfg: Config) -> int:
                 "market_open": result.market_open,
                 "probability": result.probability,
                 "confidence": result.confidence,
+                # Derived from the approved recommendations — see publication.py.
                 "ideas": result.ideas,
+                "recommendations": [r.to_dict() for r in result.publication.active()],
+                "review": result.publication.summary(),
+                "rejected": [r.to_dict() for r in result.publication.rejected],
+                "control_path": result.trace.to_dict(),
                 "agents": {k: v.to_dict() for k, v in result.reports.items()},
                 "reports": {k: str(v) for k, v in paths.items()},
             },
@@ -154,6 +160,16 @@ async def cmd_score(args, cfg: Config) -> int:
         print(f"Resolved {resolved} of {len(pending)} pending predictions.")
 
     result = engine.score_and_learn()
+
+    # --- the 2.0 closed loop, part of scoring rather than a side-car ---
+    # LearningEngine keeps its job: baseline reliability and calibration.
+    # ClosedLoop adds after-action review, contextual contribution, mistake
+    # and institutional memory, and — only on recurring failures — proposals.
+    from .closed_loop import ClosedLoop
+
+    cycle = ClosedLoop(store.conn).run(propose=not getattr(args, "no_propose", False))
+    print("\n" + cycle.render())
+
     print("\n" + result.verdict)
     if result.resolved >= 5:
         print(f"\nHit rate       {result.hit_rate:.1%}")
@@ -702,6 +718,23 @@ def cmd_dashboard(args, cfg: Config) -> int:
     if sysinfo["open_circuits"]:
         print(f"  ⚠ open circuits: {', '.join(sysinfo['open_circuits'])}")
 
+    # Which architecture actually executed on the most recent run. Printed
+    # unconditionally so a silent fall back to legacy routing is visible
+    # without anyone having to go looking for it.
+    row = store.conn.execute(
+        "SELECT orchestration_mode, agents_executed, agents_skipped, "
+        "recommendations_candidate, recommendations_approved, "
+        "recommendations_rejected, legacy_fallback_used, degradation_level "
+        "FROM run_control_path ORDER BY run_id DESC LIMIT 1").fetchone()
+    if row:
+        mode, ran, skipped, cand, ok, rej, legacy, degr = row
+        print(f"\n  last run: mode={mode}  agents {ran} ran / {skipped} skipped")
+        print(f"            candidates {cand} → {ok} approved, {rej} rejected"
+              f"  (degradation: {degr})")
+        if legacy:
+            print("            ⚠ LEGACY FALLBACK — recommendations were not "
+                  "produced by the 2.0 review path")
+
     perf = data["performance"]
     if perf.get("n"):
         print(f"\n  Track record   {perf['n']} resolved, hit {perf['hit_rate']:.0%}, "
@@ -746,10 +779,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--force", action="store_true", help="run even when the market is closed")
     r.add_argument("--json", action="store_true", help="emit JSON instead of the report")
     r.add_argument("--no-llm", action="store_true", help="skip the narrative layer")
+    r.add_argument("--mode", choices=ORCHESTRATION_MODES,
+                   help="orchestration mode (default from config: dynamic)")
 
     s = sub.add_parser("score", help="resolve past predictions and learn from them")
     s.add_argument("--date", help="score everything up to this date")
     s.add_argument("--postmortem", action="store_true", help="add an LLM post-mortem")
+    s.add_argument("--no-propose", action="store_true",
+                   help="skip the Research Scientist pass")
 
     c = sub.add_parser("calibration", help="show the track record and calibration curve")
     c.add_argument("--days", type=int, default=365)

@@ -384,7 +384,57 @@ CREATE INDEX IF NOT EXISTS idx_sysev_comp ON system_events(component, level);
 """)
 
 
-MIGRATIONS: list[Migration] = [M001, M002, M003, M004]
+# 005 — publication lifecycle and lineage.
+#
+# The `recommendations` table from 002 stored a recommendation but had no way
+# to say whether it was ever allowed out. Without a status column, "rejected"
+# and "published" are the same row, and the audit trail cannot answer the one
+# question it exists to answer. Lineage columns let a published call be traced
+# back to the candidate, evidence graph and review decision that produced it.
+M005 = Migration(5, "publication_lifecycle", """
+ALTER TABLE recommendations ADD COLUMN status TEXT NOT NULL DEFAULT 'APPROVED';
+ALTER TABLE recommendations ADD COLUMN candidate_id TEXT;
+ALTER TABLE recommendations ADD COLUMN evidence_graph_id TEXT;
+ALTER TABLE recommendations ADD COLUMN review_decision_id TEXT;
+ALTER TABLE recommendations ADD COLUMN revision_parent_id TEXT;
+ALTER TABLE recommendations ADD COLUMN rejection_reason TEXT;
+ALTER TABLE recommendations ADD COLUMN review_audit TEXT;
+ALTER TABLE recommendations ADD COLUMN orchestration_mode TEXT;
+ALTER TABLE recommendations ADD COLUMN source_kind TEXT;
+CREATE INDEX IF NOT EXISTS idx_rec_status ON recommendations(status, run_date);
+
+-- One row per run recording which architecture actually executed. This is the
+-- table that makes a silent fallback to legacy behaviour impossible to hide.
+CREATE TABLE IF NOT EXISTS run_control_path (
+    run_id INTEGER PRIMARY KEY,
+    run_date TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    orchestration_mode TEXT NOT NULL,
+    event_count INTEGER DEFAULT 0,
+    investigation_count INTEGER DEFAULT 0,
+    agents_available INTEGER DEFAULT 0,
+    agents_selected INTEGER DEFAULT 0,
+    agents_executed INTEGER DEFAULT 0,
+    agents_skipped INTEGER DEFAULT 0,
+    agent_execution_reason TEXT,
+    review_iterations INTEGER DEFAULT 0,
+    recommendations_candidate INTEGER DEFAULT 0,
+    recommendations_approved INTEGER DEFAULT 0,
+    recommendations_modified INTEGER DEFAULT 0,
+    recommendations_rejected INTEGER DEFAULT 0,
+    recommendations_published INTEGER DEFAULT 0,
+    legacy_fallback_used INTEGER DEFAULT 0,
+    degradation_level TEXT,
+    learning_context_loaded INTEGER DEFAULT 0,
+    memories_loaded INTEGER DEFAULT 0,
+    estimated_cost_units REAL DEFAULT 0,
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rcp_date ON run_control_path(run_date);
+""")
+
+
+MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005]
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
 
 

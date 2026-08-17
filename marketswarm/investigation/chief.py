@@ -367,6 +367,14 @@ class ChiefInvestigator:
             notes=[f"follow-up depth {depth} for {parent.id}"],
         )
 
+    def agents_for_questions(self, questions: list[str]) -> list[str]:
+        """Public entry point for question → capability routing.
+
+        The orchestrator needs this when a review gate asks for evidence and
+        there is no parent plan to inherit a budget from.
+        """
+        return self._agents_for_questions(questions)
+
     def _agents_for_questions(self, questions: list[str]) -> list[str]:
         """Map plain-English evidence requests onto capabilities.
 

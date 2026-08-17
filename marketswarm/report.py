@@ -143,23 +143,55 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
     out.append(DISCLAIMER)
     out.append("")
 
+    pub = result.publication
+    if pub.suppressed:
+        out.append("## Recommendations withheld")
+        out.append("")
+        out.append(f"> **No recommendation is published for this session.** "
+                   f"{pub.suppression_reason}")
+        out.append("")
+        out.append("The analysis below is still shown, because the observations are "
+                   "real and may be useful. What is missing is the part that turns "
+                   "observations into a position, and that part is missing on purpose "
+                   "rather than by omission.")
+        out.append("")
+        out.extend(_render_review_summary(pub))
+        out.extend(_render_supporting_sections(result))
+        return "\n".join(out)
+
     pb = result.reports.get("playbook")
-    if not pb or not pb.usable:
+    if (not pb or not pb.usable) and not pub.active():
         out.append("The playbook could not be constructed — insufficient data this morning.")
         if pb and pb.error:
             out.append(f"> {pb.error}")
         return "\n".join(out)
 
-    out.append(f"*{pb.headline}*")
-    out.append("")
+    # The publication set is the source of the ideas below; the playbook
+    # agent only supplies the headline it happened to write.
+    if pb and pb.usable:
+        out.append(f"*{pb.headline}*")
+        out.append("")
 
-    out.extend(_render_idea_block("## 1. Best Call Options", result.ideas.get("calls", []),
+    # Every idea below is derived from an approved recommendation. A candidate
+    # the review gate rejected has no path into this renderer.
+    ideas = result.ideas
+    out.extend(_render_idea_block("## 1. Best Call Options", ideas.get("calls", []),
                                  "call", demo))
-    out.extend(_render_idea_block("## 2. Best Put Options", result.ideas.get("puts", []),
+    out.extend(_render_idea_block("## 2. Best Put Options", ideas.get("puts", []),
                                   "put", demo))
-    out.extend(_render_stock_block(result.ideas.get("stocks", []), demo))
+    out.extend(_render_stock_block(ideas.get("stocks", []), demo))
+    out.extend(_render_non_actionable(pub))
+    out.extend(_render_review_summary(pub))
 
-    # ---- red team ----
+    out.extend(_render_supporting_sections(result))
+    return "\n".join(out)
+
+
+def _render_supporting_sections(result) -> list[str]:
+    """Red team and the reading guide — shown whether or not anything was
+    published, because the objections are informative either way."""
+    out: list[str] = []
+
     rt = result.reports.get("red_team")
     if rt and rt.usable and rt.data.get("objections"):
         out.append("## 4. Red Team — the case against everything above")
@@ -196,7 +228,54 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
     out.append("")
     out.append(DISCLAIMER)
     out.append("")
-    return "\n".join(out)
+    return out
+
+
+def _render_non_actionable(pub) -> list[str]:
+    """Recommendations that are real outputs but are not trades.
+
+    A WATCH, a NO_EDGE and an INSUFFICIENT_EVIDENCE are conclusions. 1.x had
+    no way to express them, so they were silently absent; showing them is how
+    a reader can tell the difference between "we looked and found nothing" and
+    "we did not look".
+    """
+    others = [r for r in pub.active() if not r.actionable]
+    if not others:
+        return []
+
+    out = ["## 3b. Considered and not recommended", ""]
+    out.append("| Symbol | Verdict | Conviction | Why |")
+    out.append("|---|---|---|---|")
+    for r in sorted(others, key=lambda x: x.subject):
+        why = (r.uncertainty_notes[0] if r.uncertainty_notes else r.rationale)[:160]
+        out.append(f"| {r.subject} | {r.rec_type.value} | {r.conviction.value} | {why} |")
+    out.append("")
+    return out
+
+
+def _render_review_summary(pub) -> list[str]:
+    """What the review gate did. Rejected candidates appear here — as review
+    history, which is the only place they are ever allowed to appear."""
+    if not pub.rejected and not pub.suppressed:
+        return []
+
+    out = ["## 3c. Review gate", ""]
+    s = pub.summary()
+    out.append(f"*{s['approved']} approved, {s['modified']} modified, "
+               f"{s['rejected']} rejected across {pub.review_iterations} "
+               f"review iteration(s).*")
+    out.append("")
+    if pub.rejected:
+        out.append("**Rejected before publication.** These were built, attacked, and did "
+                   "not survive. They are listed so the reasoning is auditable — they are "
+                   "not recommendations and are not tracked as ideas.")
+        out.append("")
+        for r in pub.rejected:
+            out.append(f"- **{r.subject}** — {r.reason}")
+            for f in r.findings[:3]:
+                out.append(f"  - {f}")
+        out.append("")
+    return out
 
 
 def _render_idea_block(title: str, ideas: list[dict], kind: str, demo: bool = False) -> list[str]:

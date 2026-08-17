@@ -24,6 +24,7 @@ belongs in code where it can be tested.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
@@ -105,6 +106,9 @@ class ReviewDecision:
     decided_at: str = field(
         default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat()
     )
+    # Stable handle so a published recommendation can cite the decision that
+    # let it through, and a rejected one the decision that stopped it.
+    id: str = field(default_factory=lambda: f"rev_{uuid.uuid4().hex[:12]}")
 
     @property
     def confidence_delta(self) -> int:
