@@ -82,6 +82,66 @@ def evaluate_trade(
     )
 
 
+def evaluate_bracket(
+    barrier,
+    entry: float,
+    target: float,
+    stop: float,
+    cost_r: float = 0.06,
+    kelly_cap: float = 0.25,
+    max_risk_pct: float = 1.0,
+) -> TradeMath:
+    """Score a bracket using the full three-way path distribution.
+
+    `evaluate_trade` collapses the outcome to win/lose, which silently treats
+    every session that touches neither barrier as a maximum loss. On a
+    one-session horizon that is roughly half of all brackets, and they are
+    flattened at the close — near zero on average, not −1R. Using the binary
+    form here understates expected value by a wide margin and causes the system
+    to reject setups that are genuinely positive.
+
+    This uses the Monte Carlo's own expected R, which already marks unresolved
+    paths to their terminal price.
+    """
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    if risk <= 0:
+        return TradeMath(0, 0, -1, 1, 0, 0, -1, "invalid bracket: zero risk")
+
+    b = reward / risk
+    exp_r = float(barrier.expected_r)
+    exp_r_net = exp_r - cost_r
+    breakeven = 1 / (1 + b)
+    p_profit = float(getattr(barrier, "p_profitable", barrier.p_target_first))
+
+    # Kelly needs a binary payoff. Use the probability that reproduces this
+    # expected value on a win/lose bet of the same size, so sizing stays
+    # consistent with the EV actually being claimed.
+    p_equiv = max(0.0, min(1.0, (exp_r + 1.0) / (b + 1.0)))
+    kelly = max(0.0, (p_equiv * b - (1 - p_equiv)) / b) if b > 0 else 0.0
+    frac = min(kelly * kelly_cap, max_risk_pct / 100)
+
+    if exp_r_net <= 0:
+        verdict = "negative expectancy after costs — skip"
+    elif exp_r_net < 0.05:
+        verdict = "marginal edge — size down or pass"
+    elif exp_r_net < 0.15:
+        verdict = "acceptable edge"
+    else:
+        verdict = "strong edge"
+
+    return TradeMath(
+        p_win=p_profit,
+        reward_risk=b,
+        expected_r=exp_r,
+        breakeven_p=breakeven,
+        kelly_fraction=kelly,
+        suggested_risk_pct=frac * 100,
+        edge_after_costs=exp_r_net,
+        verdict=verdict,
+    )
+
+
 def kelly_position_size(
     account_value: float, risk_pct: float, entry: float, stop: float, contract_multiplier: float = 1.0
 ) -> dict:

@@ -397,6 +397,152 @@ class _ns:
 
 # --------------------------------------------------------------------------
 
+
+# --------------------------------------------------------------------------
+# historical data / backtest / validate / monitor
+# --------------------------------------------------------------------------
+
+def cmd_fetch(args, cfg: Config) -> int:
+    from .backtest.datastore import PointInTimeStore
+    from .backtest.fetch import load_into_store
+
+    store = PointInTimeStore(cfg.data_dir / "history.db")
+    symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
+    start = dt.date.fromisoformat(args.start) if args.start else None
+    end = dt.date.fromisoformat(args.end) if args.end else None
+
+    print(f"Fetching from {args.source}…")
+    cov = load_into_store(store, args.source, symbols=symbols, start=start, end=end,
+                          cache_dir=cfg.data_dir / "raw",
+                          path=Path(args.path).expanduser() if args.path else None)
+    print(f"\nStore now holds {cov['bars']:,} bars across {cov['symbols']} symbols "
+          f"({cov['start']} → {cov['end']})")
+    store.close()
+    return 0
+
+
+def cmd_backtest(args, cfg: Config) -> int:
+    import json as _json
+    import pickle
+
+    import numpy as np
+
+    from .backtest.datastore import PointInTimeStore
+    from .backtest.features import build_dataset
+    from .backtest.replay import BacktestEngine
+    from .backtest.validation import deflated_sharpe_ratio
+
+    store = PointInTimeStore(cfg.data_dir / "history.db")
+    cov = store.coverage()
+    if not cov["bars"]:
+        print("No history. Run `marketswarm fetch --source github_sp500` first.")
+        return 1
+
+    available = set(store.symbols(min_bars=args.min_bars))
+    universe = [s for s in (args.symbols.split(",") if args.symbols else cfg.universe)
+                if s.strip().upper() in available]
+    universe = [s.strip().upper() for s in universe]
+    if not universe:
+        print(f"None of the requested symbols have {args.min_bars}+ bars. "
+              f"Available: {', '.join(sorted(available)[:20])}…")
+        return 1
+
+    start = dt.date.fromisoformat(args.start) if args.start else None
+    end = dt.date.fromisoformat(args.end) if args.end else None
+    dates = store.trading_dates(start, end, min_symbols=max(3, len(universe) // 4))
+    print(f"Universe {len(universe)} symbols, {len(dates)} sessions "
+          f"({dates[0]} → {dates[-1]})\n")
+
+    cache = cfg.data_dir / "dataset.pkl"
+    if args.reuse_dataset and cache.exists():
+        print(f"Reusing cached dataset {cache}")
+        d = pickle.load(open(cache, "rb"))
+        X, y, meta = d["X"], d["y"], d["meta"]
+    else:
+        print("Building point-in-time features (no lookahead)…")
+        X, y, meta = build_dataset(store, universe, dates,
+                                   target_atr=args.target_atr, stop_atr=args.stop_atr)
+        pickle.dump({"X": X, "y": y, "meta": meta, "universe": universe}, open(cache, "wb"))
+    if len(X) == 0:
+        print("No usable samples.")
+        return 1
+    print(f"{len(X):,} samples, base rate {y.mean():.1%}\n")
+
+    engine = BacktestEngine(store, universe, target_atr=args.target_atr,
+                            stop_atr=args.stop_atr, min_expected_r=args.min_expected_r,
+                            mc_paths=args.mc_paths)
+
+    print("=== Baselines the strategy must beat ===")
+    for k, v in engine.run_baselines(X, y, meta).items():
+        print(f"  {k}: {v}")
+
+    print(f"\n=== Purged walk-forward ({args.folds} folds, {args.embargo}-day embargo) ===")
+    res = engine.run_walk_forward(X, y, meta, n_splits=args.folds, embargo_days=args.embargo)
+    summary = res.summary()
+
+    if summary.get("n") == 0 or summary.get("n_taken", 0) == 0:
+        print("\nNo trade cleared the expectancy gate in any fold.")
+        print("That is a finding, not an error: on this data the strategy has no edge.")
+        store.close()
+        return 0
+
+    net = summary["net"]
+    cal = summary["calibration"]
+    print(f"\n  Trades taken      {summary['n_taken']:,} of {summary['n_candidates']:,} "
+          f"candidates ({summary['selectivity']:.1%})")
+    print(f"  Net mean          {net['mean_r']:+.4f}R per trade")
+    print(f"  Hit rate          {net['hit_rate']:.1%}")
+    print(f"  Profit factor     {net['profit_factor']:.3f}")
+    print(f"  Annualised Sharpe {net['sharpe_annual']:+.2f}")
+    print(f"  Max drawdown      {net['max_drawdown_r']:.1f}R")
+    print(f"  Cost drag         {summary['cost_drag_r']:.4f}R per trade")
+    print(f"\n  Forecast {cal['mean_forecast']:.1%} vs actual {cal['actual_hit_rate']:.1%}")
+    print(f"  Brier {cal['brier']:.4f}, skill {cal['skill_score']:+.4f} — {cal['verdict']}")
+
+    if summary.get("by_regime"):
+        print("\n  By regime")
+        for reg, b in sorted(summary["by_regime"].items(), key=lambda kv: -kv[1]["n"]):
+            print(f"    {reg:16} n={b['n']:5d}  net {b['mean_r']:+.4f}R  hit {b['hit_rate']:.1%}")
+
+    if res.feature_importances:
+        print("\n  Feature weights (log-odds per SD, final fold)")
+        for nm, c in res.feature_importances[:10]:
+            print(f"    {nm:>16} {c:+.4f}")
+
+    r = res.returns(net=True)
+    if len(r) >= 20:
+        dsr = deflated_sharpe_ratio(r, n_trials=args.n_trials)
+        print(f"\n=== Deflated Sharpe (n_trials={args.n_trials}) ===")
+        print(f"  {dsr.verdict}")
+
+    if args.out:
+        Path(args.out).expanduser().write_text(_json.dumps(summary, indent=2, default=str))
+        print(f"\nWrote {args.out}")
+
+    print("\nReminder: a positive result here is necessary, not sufficient. Paper-trade "
+          "before believing it.")
+    store.close()
+    return 0
+
+
+async def cmd_monitor(args, cfg: Config) -> int:
+    from .monitor import InvalidationMonitor, watch
+
+    store = MemoryStore(cfg.db_path)
+    if args.once:
+        monitor = InvalidationMonitor(store)
+        statuses = await monitor.check()
+        if not statuses:
+            print("No live ideas for today.")
+        for s in statuses:
+            print(s.line())
+        store.close()
+        return 0
+    await watch(store, interval_seconds=args.interval, webhook=cfg.webhook_url)
+    store.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="marketswarm",
@@ -427,6 +573,33 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("path", nargs="?")
     i.add_argument("--force", action="store_true")
 
+
+    f = sub.add_parser("fetch", help="download historical data into the point-in-time store")
+    f.add_argument("--source", default="github_sp500",
+                   choices=["github_sp500", "github_spy", "yahoo", "stooq", "csv"])
+    f.add_argument("--symbols", help="comma-separated (required for yahoo/stooq)")
+    f.add_argument("--start"); f.add_argument("--end"); f.add_argument("--path")
+
+    b = sub.add_parser("backtest", help="purged walk-forward replay over stored history")
+    b.add_argument("--symbols", help="comma-separated; defaults to the configured universe")
+    b.add_argument("--start"); b.add_argument("--end")
+    b.add_argument("--folds", type=int, default=5)
+    b.add_argument("--embargo", type=int, default=5)
+    b.add_argument("--target-atr", type=float, default=1.0, dest="target_atr")
+    b.add_argument("--stop-atr", type=float, default=0.6, dest="stop_atr")
+    b.add_argument("--min-expected-r", type=float, default=0.0, dest="min_expected_r")
+    b.add_argument("--mc-paths", type=int, default=1200, dest="mc_paths")
+    b.add_argument("--min-bars", type=int, default=400, dest="min_bars")
+    b.add_argument("--n-trials", type=int, default=1, dest="n_trials",
+                   help="how many configurations you have tried in total — be honest, "
+                        "it is the deflation hurdle")
+    b.add_argument("--reuse-dataset", action="store_true", dest="reuse_dataset")
+    b.add_argument("--out", help="write the summary as JSON")
+
+    m = sub.add_parser("monitor", help="watch today's ideas for invalidation")
+    m.add_argument("--interval", type=int, default=300)
+    m.add_argument("--once", action="store_true")
+
     h = sub.add_parser("holidays", help="list market closures")
     h.add_argument("year", nargs="?", type=int)
 
@@ -448,6 +621,12 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             log.info("daemon stopped")
             return 0
+    if args.command == "fetch":
+        return cmd_fetch(args, cfg)
+    if args.command == "backtest":
+        return cmd_backtest(args, cfg)
+    if args.command == "monitor":
+        return asyncio.run(cmd_monitor(args, cfg))
     if args.command == "calibration":
         return cmd_calibration(args, cfg)
     if args.command == "status":

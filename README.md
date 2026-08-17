@@ -12,7 +12,7 @@ then, after the close, scores itself and updates its own weights.
 
 ## What it actually does
 
-Fifteen agents run in dependency-ordered stages, each publishing findings,
+Sixteen agents run in dependency-ordered stages, each publishing findings,
 evidence with provenance, and directional signals:
 
 | Stage | Agents |
@@ -22,6 +22,7 @@ evidence with provenance, and directional signals:
 | 3 | cross-verification |
 | 4 | risk assessment |
 | 5 | day trading playbook |
+| 6 | red team (argues against the playbook) |
 
 Any agent may fail. A failure degrades the report and is stated in it; it never
 takes down the run.
@@ -82,6 +83,56 @@ This is the part that separates it from a headline summarizer.
 Everything is persisted in SQLite and read back by the next morning's run. The
 agent's behaviour changes over time without anyone editing code.
 
+
+---
+
+## Historical validation
+
+The agent ships with a replay harness so you do not have to wait a year to find
+out whether it works. It reruns the **production** decision code over years of
+real data with purged walk-forward validation, realistic costs, and overfitting
+controls.
+
+```bash
+marketswarm fetch --source github_sp500      # 505 names, daily OHLCV, 2013-2018
+marketswarm backtest --folds 5 --n-trials 12
+```
+
+Design points that make it honest rather than flattering:
+
+- **Lookahead is structurally impossible.** `PointInTimeStore` raises
+  `LookaheadError` when asked for data past the decision timestamp. Features
+  see prior bars plus that day's opening print — nothing else.
+- **It tests the real code.** The replay imports the live `_build_bracket`,
+  barrier Monte Carlo and EV gate. A backtest of a reimplementation measures
+  the reimplementation.
+- **Ambiguity resolves pessimistically.** Daily bars cannot say whether the
+  high or the low came first; sessions touching both barriers score as losses.
+- **Purged, embargoed folds.** Training samples whose outcome window overlaps
+  the test block are dropped, plus an embargo either side.
+- **Selection bias is priced in.** Deflated Sharpe against the best-of-N-random
+  hurdle, and CSCV probability of backtest overfitting.
+- **Baselines are always reported.** Always-long and random-entry run alongside,
+  because "positive" means nothing until it beats doing something stupid.
+
+**Results on 2013-2018 are in [`FINDINGS.md`](FINDINGS.md): no demonstrated
+edge**, and four real bugs found along the way. Read it before trusting
+anything the agent prints.
+
+## Intraday monitoring
+
+The morning report is stale by 9:35. Every idea carries machine-checkable
+invalidation conditions, and this checks them live:
+
+```bash
+marketswarm monitor            # poll every 5 minutes
+marketswarm monitor --once     # single check
+```
+
+It reports each idea as pending / working / target hit / stopped / invalidated,
+tracks maximum favourable and adverse excursion, and closes out resolved ideas
+so the learning loop sees the same outcome you did. It never places an order.
+
 ---
 
 ## Install on a VPS
@@ -128,6 +179,10 @@ marketswarm calibration          # reliability curve, Brier decomposition, learn
 marketswarm status               # session, config, integrations, track record
 marketswarm holidays 2026        # market closures and early closes
 marketswarm daemon               # scheduler (what systemd runs)
+
+marketswarm fetch --source github_sp500   # download historical data
+marketswarm backtest --n-trials 12        # purged walk-forward validation
+marketswarm monitor                       # intraday invalidation watch
 ```
 
 The daemon runs the research pass at `MARKETSWARM_RUN_TIME` ET on trading days
@@ -179,10 +234,12 @@ returns.
 
 ## Honest limitations
 
-- **The edge is small and may be zero.** A calibrated 55% read on a one-session
-  horizon is, after costs, close to break-even. The agent will regularly report
-  that no idea clears expected value — that is the system working, not failing.
-  Run `marketswarm calibration` and believe the SPRT verdict over the narrative.
+- **The edge is unproven, and measured at zero.** Five years of purged
+  walk-forward on real data produced −0.07R per trade net of costs, a Brier
+  skill score of −0.007, PBO 0.46 and a deflated Sharpe of 0.13. See
+  [`FINDINGS.md`](FINDINGS.md). The agent will regularly report that no idea
+  clears expected value — that is the system working, not failing. Run
+  `marketswarm calibration` and believe the SPRT verdict over the narrative.
 - **"Options flow" is inferred, not observed.** Free chains give volume and
   open interest, not the trade tape. Unusual activity here means high
   volume/OI turnover; it cannot distinguish an institutional buy from a dealer
@@ -203,9 +260,11 @@ pip install pytest pytest-asyncio
 pytest -q
 ```
 
-67 tests cover the market calendar (including observed-holiday and
-Good Friday rules), every statistical routine, and a full end-to-end swarm run
-against synthetic providers so the playbook path is exercised without network.
+101 tests cover the market calendar (including observed-holiday and Good
+Friday rules), every statistical routine, config handling, a full end-to-end
+swarm run against synthetic providers, and the backtest machinery — including
+negative tests that the store *refuses* lookahead, that purged folds do not
+leak, and that ambiguous bars resolve pessimistically.
 
 ## Licence
 

@@ -41,13 +41,29 @@ SECTION_ORDER = [
 ]
 
 
-def render_markdown(result: SwarmResult, narrative: str | None = None) -> str:
+DEMO_BANNER = (
+    "> # ⚠ SAMPLE REPORT — SYNTHETIC DATA\n"
+    "> **Every price, ticker, headline and filing below is fabricated test data.** The\n"
+    "> fixtures generate each symbol from a random walk starting at $100, so a symbol\n"
+    "> labelled NVDA may show $118 when the real stock trades at $225. Strikes are chosen\n"
+    "> from those fake prices.\n"
+    ">\n"
+    "> **Do not trade anything on this page.** It exists to show the layout and the maths.\n"
+    "> On a live install every number is replaced by the real quote."
+)
+
+
+def render_markdown(result: SwarmResult, narrative: str | None = None,
+                    demo: bool = False) -> str:
     d = result.run_date
     status = clock.day_status(d)
     out: list[str] = []
 
     out.append(f"# Pre-Market Intelligence — {d:%A, %d %B %Y}")
     out.append("")
+    if demo:
+        out.append(DEMO_BANNER)
+        out.append("")
     out.append(f"*Generated {result.started_at.astimezone(clock.ET):%H:%M:%S ET} · "
                f"{result.duration_seconds:.1f}s · "
                f"{result.agents_ok} agents reporting, {result.agents_failed} degraded*")
@@ -122,6 +138,9 @@ def render_markdown(result: SwarmResult, narrative: str | None = None) -> str:
     out.append("")
     out.append("# Day Trading Playbook")
     out.append("")
+    if demo:
+        out.append(DEMO_BANNER)
+        out.append("")
     out.append(DISCLAIMER)
     out.append("")
 
@@ -135,9 +154,27 @@ def render_markdown(result: SwarmResult, narrative: str | None = None) -> str:
     out.append(f"*{pb.headline}*")
     out.append("")
 
-    out.extend(_render_idea_block("## 1. Best Call Options", result.ideas.get("calls", []), "call"))
-    out.extend(_render_idea_block("## 2. Best Put Options", result.ideas.get("puts", []), "put"))
-    out.extend(_render_stock_block(result.ideas.get("stocks", [])))
+    out.extend(_render_idea_block("## 1. Best Call Options", result.ideas.get("calls", []),
+                                 "call", demo))
+    out.extend(_render_idea_block("## 2. Best Put Options", result.ideas.get("puts", []),
+                                  "put", demo))
+    out.extend(_render_stock_block(result.ideas.get("stocks", []), demo))
+
+    # ---- red team ----
+    rt = result.reports.get("red_team")
+    if rt and rt.usable and rt.data.get("objections"):
+        out.append("## 4. Red Team — the case against everything above")
+        out.append("")
+        out.append(f"*{rt.headline}*")
+        out.append("")
+        for o in rt.data["objections"]:
+            out.append(f"- **[{o['severity']}]** {o['objection']}")
+            out.append(f"  - *Test:* {o['test']}")
+        out.append("")
+        if rt.data.get("recommend_stand_down"):
+            out.append("> **Two or more high-severity objections stand.** Today's conviction is not "
+                       "supported by independent evidence. Trade below the risk budget, or not at all.")
+            out.append("")
 
     out.append("## How to read these numbers")
     out.append("")
@@ -163,7 +200,7 @@ def render_markdown(result: SwarmResult, narrative: str | None = None) -> str:
     return "\n".join(out)
 
 
-def _render_idea_block(title: str, ideas: list[dict], kind: str) -> list[str]:
+def _render_idea_block(title: str, ideas: list[dict], kind: str, demo: bool = False) -> list[str]:
     out = [title, ""]
     if not ideas:
         out.append(f"No {kind} candidate could be constructed today — either no symbol carried a "
@@ -173,7 +210,8 @@ def _render_idea_block(title: str, ideas: list[dict], kind: str) -> list[str]:
         return out
 
     for n, i in enumerate(ideas, 1):
-        out.append(f"### {n}. {i['symbol']} {i.get('strike', '')} {kind.upper()} "
+        tag = "SAMPLE / FAKE PRICE — " if demo else ""
+        out.append(f"### {n}. {tag}{i['symbol']} {i.get('strike', '')} {kind.upper()} "
                    f"{'exp ' + i['expiration'] if i.get('expiration') else ''}")
         out.append("")
         out.append(f"| | |")
@@ -214,8 +252,11 @@ def _render_idea_block(title: str, ideas: list[dict], kind: str) -> list[str]:
     return out
 
 
-def _render_stock_block(ideas: list[dict]) -> list[str]:
+def _render_stock_block(ideas: list[dict], demo: bool = False) -> list[str]:
     out = ["## 3. Best Stocks for Day Trading", ""]
+    if demo:
+        out.append("*Every price in this table is synthetic test data, not a real quote.*")
+        out.append("")
     if not ideas:
         out.append("No stock setup cleared the expectancy bar today.")
         out.append("")
@@ -273,6 +314,9 @@ details {{ margin:.6rem 0; }} summary {{ cursor:pointer; color:var(--muted); fon
 code {{ background:var(--card); padding:.1rem .3rem; border-radius:4px; font-size:.9em; }}
 ul {{ padding-left:1.2rem; }} li {{ margin:.25rem 0; }}
 .meta {{ color:var(--muted); font-size:.88rem; }}
+.demo-bar {{ position:sticky; top:0; z-index:99; background:#b3261e; color:#fff;
+             padding:.6rem 1rem; margin:-2rem -1rem 1.5rem; font-weight:700;
+             text-align:center; font-size:.95rem; }}
 hr {{ border:0; border-top:1px solid var(--line); margin:2rem 0; }}
 </style></head><body><main>
 {body}
@@ -280,9 +324,9 @@ hr {{ border:0; border-top:1px solid var(--line); margin:2rem 0; }}
 """
 
 
-def render_html(result: SwarmResult, narrative: str | None = None) -> str:
+def render_html(result: SwarmResult, narrative: str | None = None, demo: bool = False) -> str:
     """Minimal Markdown→HTML conversion, dependency-free."""
-    md = render_markdown(result, narrative)
+    md = render_markdown(result, narrative, demo)
     body: list[str] = []
     in_table = in_list = in_details = False
 
@@ -342,7 +386,11 @@ def render_html(result: SwarmResult, narrative: str | None = None) -> str:
     if in_list:
         body.append("</ul>")
 
-    return HTML_TEMPLATE.format(date=f"{result.run_date:%d %B %Y}", body="\n".join(body))
+    page = "\n".join(body)
+    if demo:
+        page = ('<div class="demo-bar">⚠ SAMPLE REPORT — ALL PRICES ARE SYNTHETIC TEST DATA. '
+                'DO NOT TRADE.</div>') + page
+    return HTML_TEMPLATE.format(date=f"{result.run_date:%d %B %Y}", body=page)
 
 
 def _inline(text: str) -> str:
@@ -355,15 +403,16 @@ def _inline(text: str) -> str:
     return t
 
 
-def write_reports(result: SwarmResult, report_dir: Path, narrative: str | None = None) -> dict[str, Path]:
+def write_reports(result: SwarmResult, report_dir: Path, narrative: str | None = None,
+                  demo: bool = False) -> dict[str, Path]:
     report_dir = Path(report_dir).expanduser()
     report_dir.mkdir(parents=True, exist_ok=True)
     stamp = result.run_date.isoformat()
 
     md_path = report_dir / f"premarket-{stamp}.md"
     html_path = report_dir / f"premarket-{stamp}.html"
-    md_path.write_text(render_markdown(result, narrative), encoding="utf-8")
-    html_path.write_text(render_html(result, narrative), encoding="utf-8")
+    md_path.write_text(render_markdown(result, narrative, demo), encoding="utf-8")
+    html_path.write_text(render_html(result, narrative, demo), encoding="utf-8")
 
     latest = report_dir / "latest.html"
     try:

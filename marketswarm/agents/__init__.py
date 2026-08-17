@@ -8,6 +8,7 @@ from .market_agents import (
     VolatilityRegimeAgent,
 )
 from .news_agents import BreakingNewsAgent, EarningsAgent, EconCalendarAgent, SECFilingsAgent
+from .redteam import RedTeamAgent
 from .synthesis import CrossVerificationAgent, PlaybookAgent, RiskAgent
 
 # Execution order is derived from `depends_on`; this is just the roster.
@@ -27,6 +28,7 @@ ALL_AGENTS: list[type[BaseAgent]] = [
     CrossVerificationAgent,
     RiskAgent,
     PlaybookAgent,
+    RedTeamAgent,
 ]
 
 __all__ = ["ALL_AGENTS", "AgentReport", "BaseAgent", "SwarmContext"]

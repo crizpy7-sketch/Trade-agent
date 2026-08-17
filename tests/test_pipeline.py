@@ -294,3 +294,40 @@ def test_performance_summary_reports_calibration_gap(tmp_path):
     assert perf["by_kind"]["call_idea"]["hit_rate"] == pytest.approx(0.5)
     assert perf["by_kind"]["call_idea"]["calibration_gap"] == pytest.approx(0.4)
     store.close()
+
+
+def test_red_team_objections_reach_the_report(reports, tmp_path):
+    """The red team is worthless if its objections never get rendered."""
+    reps, ctx = reports
+    rt = reps["red_team"]
+    assert rt.usable and rt.data["objections"], "red team produced nothing to render"
+
+    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps)
+    pb = reps["playbook"]
+    result.ideas = {"calls": pb.data["calls"], "puts": pb.data["puts"], "stocks": pb.data["stocks"]}
+    md = render_markdown(result)
+
+    assert "Red Team" in md
+    assert rt.data["objections"][0]["objection"][:40] in md
+    assert "*Test:*" in md
+
+
+def test_demo_flag_marks_every_idea_card(reports):
+    """A sample report must be unmistakable even from a screenshot of one card —
+    fake prices that look real are the most dangerous output this thing can make."""
+    reps, ctx = reports
+    result = SwarmResult(run_date=ctx.run_date, market_open=True, reports=reps)
+    pb = reps["playbook"]
+    result.ideas = {"calls": pb.data["calls"], "puts": pb.data["puts"], "stocks": pb.data["stocks"]}
+
+    plain = render_markdown(result, demo=False)
+    assert "SAMPLE" not in plain
+
+    demo = render_markdown(result, demo=True)
+    assert demo.count("SAMPLE REPORT — SYNTHETIC DATA") >= 2   # top and above the playbook
+    for i in result.ideas["calls"] + result.ideas["puts"]:
+        assert f"SAMPLE / FAKE PRICE — {i['symbol']}" in demo
+
+    html = render_html(result, demo=True)
+    assert 'class="demo-bar"' in html
+    assert "position:sticky" in html

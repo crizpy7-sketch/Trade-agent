@@ -93,8 +93,27 @@ Useful commands
     marketswarm run --force          run even when the market is closed (testing)
     marketswarm score                resolve past ideas and learn from them
     marketswarm calibration          your track record and reliability curve
+    marketswarm monitor              watch today's ideas for invalidation
     marketswarm status               session, config, integrations
     marketswarm holidays 2026        market closures
+
+Historical validation (do this first)
+-------------------------------------
+
+Before trusting anything the agent prints, measure it against history:
+
+    marketswarm fetch --source github_sp500     # 505 names, 2013-2018, ~29 MB
+    marketswarm backtest --folds 5 --n-trials 12
+
+This replays the real decision code over five years with purged walk-forward
+validation, realistic costs, and overfitting controls. It takes a few minutes.
+
+Read FINDINGS.md for what happened when I ran it: no demonstrated edge, and
+four real bugs found in the process. That file is the most useful thing in
+this package.
+
+Set --n-trials to the number of configurations you have actually tried. It is
+the statistical hurdle the result must clear. Understating it only fools you.
 
 Under systemd, prefix these with:
 

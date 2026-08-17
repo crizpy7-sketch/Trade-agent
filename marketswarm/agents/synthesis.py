@@ -376,10 +376,10 @@ class PlaybookAgent(BaseAgent):
             barrier = dist.barrier_probabilities(
                 entry=entry, target=target, stop=stop, sigma_daily=sigma,
                 horizon_days=1.0, drift_daily=drift, n_paths=8000,
-                seed=zlib.crc32(sym.encode()) % 10_000,   # stable across processes
+                seed=0,   # deterministic: identical inputs must give identical reports
             )
-            trade = edgemod.evaluate_trade(
-                barrier.p_target_first, entry, target, stop,
+            trade = edgemod.evaluate_bracket(
+                barrier, entry, target, stop,
                 cost_r=ctx.config.friction_r if sym in ("SPY", "QQQ") else ctx.config.friction_r * 1.6,
             )
 
@@ -391,8 +391,10 @@ class PlaybookAgent(BaseAgent):
             math_note = (
                 f"Monte Carlo (Student-t, df=4, {8000:,} paths, σ={sigma*100:.2f}%/day): "
                 f"P(target first) {barrier.p_target_first:.0%}, P(stop first) {barrier.p_stop_first:.0%}, "
-                f"P(neither) {barrier.p_neither:.0%}. R:R {trade.reward_risk:.2f}, "
-                f"breakeven win rate {trade.breakeven_p:.0%}, expected {trade.expected_r:+.2f}R "
+                f"P(neither barrier) {barrier.p_neither:.0%} — of those, {barrier.p_neither_positive:.0%} "
+                f"close green, averaging {barrier.mean_r_neither:+.2f}R. "
+                f"Overall P(profit) {trade.p_win:.0%}. R:R {trade.reward_risk:.2f}, "
+                f"breakeven {trade.breakeven_p:.0%}, expected {trade.expected_r:+.2f}R "
                 f"({trade.edge_after_costs:+.2f}R after costs). "
                 f"Quarter-Kelly sizing {trade.suggested_risk_pct:.2f}% of account. {trade.verdict}."
             )
@@ -483,6 +485,9 @@ def _build_bracket(
     long_side: bool,
     support: float | None,
     resistance: float | None,
+    min_risk_atr: float = 0.35,
+    max_risk_atr: float = 1.10,
+    buffer_atr: float = 0.15,
 ) -> tuple[float, float, float] | None:
     """Place entry, stop and target off structure and volatility.
 
@@ -499,9 +504,9 @@ def _build_bracket(
     if atr <= 0 or price <= 0:
         return None
 
-    buffer = 0.15 * atr
-    min_risk = 0.35 * atr
-    max_risk = 1.10 * atr
+    buffer = buffer_atr * atr
+    min_risk = min_risk_atr * atr
+    max_risk = max(min_risk, max_risk_atr * atr)
 
     if long_side:
         struct_stop = (support - buffer) if (support and support < price) else (price - 0.6 * atr)

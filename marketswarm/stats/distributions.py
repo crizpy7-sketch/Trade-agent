@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -154,6 +155,81 @@ class TouchProbabilities:
     expected_r: float
     p_target_touch: float
     p_stop_touch: float
+    p_neither_positive: float = 0.0   # of the unresolved paths, share closing green
+    mean_r_neither: float = 0.0
+
+    @property
+    def p_profitable(self) -> float:
+        """Probability the position is closed at a profit.
+
+        Distinct from `p_target_first`: on a one-session horizon roughly half
+        of all brackets touch neither barrier, and those are flattened at the
+        close — sometimes green. Scoring those as losses (the obvious mistake)
+        makes every bracket look unprofitable.
+        """
+        return self.p_target_first + self.p_neither * self.p_neither_positive
+
+
+@lru_cache(maxsize=8192)
+def _barrier_z(
+    z_target: float,
+    z_stop: float,
+    mu_z: float,
+    horizon: float,
+    steps: int,
+    n_paths: int,
+    df: int,
+    seed: int,
+) -> tuple:
+    """Barrier probabilities in normalised (sigma) units.
+
+    First-passage probabilities depend only on where the barriers sit in
+    standard deviations and on the drift per standard deviation — not on the
+    price level or the volatility separately. Working in those units means one
+    simulation serves every symbol with the same geometry, so a backtest over
+    tens of thousands of candidates runs a few hundred simulations instead of
+    tens of thousands.
+
+    Inputs are rounded by the caller before they reach the cache, which trades
+    a little precision for a very large amount of speed.
+    """
+    rng = np.random.default_rng(seed)
+    dt = horizon / steps
+    scale = math.sqrt(dt) / math.sqrt(df / (df - 2))   # unit-variance Student-t
+    shocks = rng.standard_t(df, size=(n_paths, steps)) * scale
+    logpaths = np.cumsum(shocks + mu_z * dt, axis=1)
+
+    long_side = z_target > 0
+    if long_side:
+        hit_t = logpaths >= z_target
+        hit_s = logpaths <= z_stop
+    else:
+        hit_t = logpaths <= z_target
+        hit_s = logpaths >= z_stop
+
+    big = steps + 10
+    first_t = np.where(hit_t.any(axis=1), hit_t.argmax(axis=1), big)
+    first_s = np.where(hit_s.any(axis=1), hit_s.argmax(axis=1), big)
+
+    win = first_t < first_s
+    loss = first_s < first_t
+    neither = (first_t >= big) & (first_s >= big)
+
+    p_win, p_loss, p_none = float(win.mean()), float(loss.mean()), float(neither.mean())
+    risk_z = abs(z_stop)
+    r_win = abs(z_target) / risk_z if risk_z > 0 else 0.0
+
+    if p_none > 0:
+        terminal = logpaths[neither, -1]
+        pnl = terminal if long_side else -terminal
+        r_each = pnl / risk_z if risk_z > 0 else pnl * 0
+        r_none = float(np.mean(r_each))
+        p_none_pos = float((r_each > 0).mean())
+    else:
+        r_none, p_none_pos = 0.0, 0.0
+
+    return (p_win, p_loss, p_none, r_win, r_none, p_none_pos,
+            float(hit_t.any(axis=1).mean()), float(hit_s.any(axis=1).mean()))
 
 
 def barrier_probabilities(
@@ -174,39 +250,22 @@ def barrier_probabilities(
     increments and no path dependence in volatility. Monte Carlo with t-shocks
     costs milliseconds and is honest about the tails.
     """
-    paths = student_t_paths(
-        entry, sigma_daily, horizon_days, steps, n_paths, drift=drift_daily, seed=seed
+    if entry <= 0 or sigma_daily <= 0 or target <= 0 or stop <= 0:
+        return TouchProbabilities(0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    # Normalise the geometry into sigma units so the cached simulation applies.
+    z_target = math.log(target / entry) / sigma_daily
+    z_stop = math.log(stop / entry) / sigma_daily
+    mu_z = drift_daily / sigma_daily
+
+    if abs(z_stop) < 1e-6 or abs(z_target) < 1e-6:
+        return TouchProbabilities(0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    (p_win, p_loss, p_none, r_win, r_none, p_none_pos, t_touch, s_touch) = _barrier_z(
+        round(z_target, 2), round(z_stop, 2), round(mu_z, 2),
+        round(horizon_days, 3), int(steps), int(n_paths), 4,
+        int(seed) % 2048 if seed is not None else 0,
     )
-    long_side = target > entry
-
-    if long_side:
-        hit_t = paths >= target
-        hit_s = paths <= stop
-    else:
-        hit_t = paths <= target
-        hit_s = paths >= stop
-
-    big = steps + 10
-    first_t = np.where(hit_t.any(axis=1), hit_t.argmax(axis=1), big)
-    first_s = np.where(hit_s.any(axis=1), hit_s.argmax(axis=1), big)
-
-    win = first_t < first_s
-    loss = first_s < first_t
-    neither = (first_t >= big) & (first_s >= big)
-
-    p_win = float(win.mean())
-    p_loss = float(loss.mean())
-    p_none = float(neither.mean())
-
-    r_win = abs(target - entry) / max(abs(entry - stop), 1e-9)
-    # Unresolved paths are marked to their terminal price, as a real trader
-    # flattening at the bell would be.
-    terminal = paths[neither, -1] if p_none > 0 else np.array([])
-    if terminal.size:
-        pnl = (terminal - entry) if long_side else (entry - terminal)
-        r_none = float(np.mean(pnl / max(abs(entry - stop), 1e-9)))
-    else:
-        r_none = 0.0
 
     exp_r = p_win * r_win - p_loss * 1.0 + p_none * r_none
     return TouchProbabilities(
@@ -214,8 +273,10 @@ def barrier_probabilities(
         p_stop_first=p_loss,
         p_neither=p_none,
         expected_r=exp_r,
-        p_target_touch=float(hit_t.any(axis=1).mean()),
-        p_stop_touch=float(hit_s.any(axis=1).mean()),
+        p_target_touch=t_touch,
+        p_stop_touch=s_touch,
+        p_neither_positive=p_none_pos,
+        mean_r_neither=r_none,
     )
 
 
