@@ -121,6 +121,13 @@ class SwarmContext:
     reports: dict[str, AgentReport] = field(default_factory=dict)
     agent_weights: dict[str, float] = field(default_factory=dict)
     lessons: list[dict] = field(default_factory=list)
+
+    # Session context, filled in by the orchestrator once the Event Brain has
+    # classified the morning. Agents may read it; the value is "any" when
+    # nothing was detected, which is an observation rather than a guess.
+    detected_events: list = field(default_factory=list)
+    event_type: str = "any"
+    regime: str = ""
     started_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
 
     def report_of(self, agent: str) -> AgentReport | None:

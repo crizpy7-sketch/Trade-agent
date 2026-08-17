@@ -100,6 +100,25 @@ class ControlPathTrace:
     estimated_cost_units: float = 0.0
     notes: str = ""
 
+    # --- review and follow-up. These exist so a stale review loop is visible
+    # --- in the trace rather than having to be inferred from behaviour.
+    review_rounds: int = 0
+    red_team_attempts: int = 0
+    red_team_successes: int = 0
+    red_team_failures: int = 0
+    review_incomplete: bool = False
+    followup_requests: int = 0
+    followup_agents_selected: int = 0
+    followup_agents_executed: int = 0
+    followup_agents_failed: int = 0
+    evidence_nodes_before_followup: int = 0
+    evidence_nodes_after_followup: int = 0
+    graph_versions: int = 1
+
+    # --- event-aware routing
+    event_context_resolved: str = "any"
+    contextual_weights_used: int = 0
+
     def to_dict(self) -> dict:
         d = dict(self.__dict__)
         d["legacy_fallback_used"] = int(self.legacy_fallback_used)
@@ -199,6 +218,7 @@ class Swarm:
     def __init__(self, config: Config, store: MemoryStore | None = None):
         self.config = config
         self.store = store or MemoryStore(config.db_path)
+        self._contextual_count = 0
         self.learning = LearningEngine(self.store)
 
         # 2.0 schema. Additive and idempotent — 1.x data is preserved.
@@ -285,24 +305,40 @@ class Swarm:
         result.finished_at = dt.datetime.now(dt.timezone.utc)
         return result
 
-    def _resolve_agent_weights(self) -> dict[str, float]:
-        """Next-run weights, from contextual learning where it exists.
+    def _resolve_agent_weights(self, regime: str | None = None,
+                               event_type: str = "any") -> dict[str, float]:
+        """Weights for this context, from contextual learning where it exists.
 
-        This is the point where the previous session's scoring changes this
-        session's behaviour. The weights feed both fusion (via
-        `ctx.agent_weights`) and routing (via the capability registry), so an
-        agent measured to add nothing is both down-weighted and less likely to
-        be run at all.
+        Called twice per run, deliberately:
+
+          stage 1  before the scan, with the previous session's regime and no
+                   event type — enough to weight the foundational agents
+          stage 2  after the Event Brain has classified today, with the real
+                   (regime, event_type) — this is the one that routes
+
+        Resolving only once, before detection, was the bug: the store can hold
+        "options_flow is worth 1.6 around earnings" and the run could never ask
+        for it, because at resolution time it did not yet know it was an
+        earnings day.
+
+        Backoff and shrinkage live in `ContextualWeightResolver` and
+        `ContributionTracker`; a thin context simply falls through to a broader
+        one rather than inventing a number.
         """
         baseline = self.learning.agent_weights()
+        self._contextual_count = 0
         try:
             from .memory.resolver import ContextualWeightResolver
 
-            regime = self._last_regime()
             resolver = ContextualWeightResolver(self.store.conn, baseline)
             names = [a.name for a in ALL_AGENTS]
-            weights = resolver.routing_weights(names, regime=regime)
-            log.info("weight provenance: %s", resolver.summary())
+            weights = resolver.routing_weights(
+                names,
+                regime=regime if regime is not None else self._last_regime(),
+                event_type=event_type)
+            summary = resolver.summary()
+            self._contextual_count = summary.get("from_contextual_learning", 0)
+            log.info("weight provenance: %s", summary)
             return weights
         except Exception as exc:  # noqa: BLE001 — never block a run on learning
             log.warning("contextual weight resolution failed, using baseline: %s", exc)
@@ -379,6 +415,19 @@ class Swarm:
                 log.info("    %s: %s (%s, %dms)", r.agent, r.headline, r.status,
                          r.duration_ms)
 
+    async def _rerun_agents(self, ctx: SwarmContext, names: list[str],
+                            result: SwarmResult, reason: str) -> None:
+        """Re-execute agents that have already run this session.
+
+        `_run_agents` is happy to re-run anything it is given, but the callers
+        that build agent lists filter out names already in `ctx.reports`. This
+        exists so the adversarial refresh after follow-up research is explicit:
+        re-running the red team is deliberate, not an accident of bookkeeping.
+        """
+        if not names:
+            return
+        await self._run_agents(ctx, names, result, reason)
+
     async def _execute_swarm(self, ctx: SwarmContext, result: SwarmResult,
                              mode: str) -> list:
         """Run the swarm for this mode. Returns the investigation plans."""
@@ -406,10 +455,37 @@ class Swarm:
         # 1. cheap broad scan
         await self._run_agents(ctx, list(SCAN_AGENTS), result, "scan: foundational")
 
-        # 2. detect, 3. plan — from what the scan actually saw
+        # 2. detect — before planning, and before routing weights are resolved
         snapshot = _snapshot_from(ctx.reports)
-        chief = ChiefInvestigator(brain=EventBrain())
-        plans = chief.plan_session(snapshot, agent_weights=self.config.agent_weights)
+        brain = EventBrain()
+        events = brain.scan(snapshot)
+        ctx.detected_events = events
+
+        # 3. resolve routing weights for *this* session's event context.
+        #
+        # Stage 1 ran before the scan and could only know the previous run's
+        # regime, because today's event had not been detected yet — which made
+        # every event-specific weight in the store unreachable at the moment it
+        # was needed. This is stage 2: now that the Event Brain has spoken,
+        # re-resolve against the real (regime, event_type) and route on that.
+        regime = ctx.data_of("volatility_regime", "regime", "") or self._last_regime()
+        event_type = _dominant_event_type(events)
+        ctx.event_type = event_type
+        ctx.regime = regime
+        result.trace.event_context_resolved = f"regime={regime}|event={event_type}"
+
+        routing_weights = self._resolve_agent_weights(regime=regime,
+                                                      event_type=event_type)
+        self.config.agent_weights = routing_weights
+        ctx.agent_weights = routing_weights
+        result.trace.contextual_weights_used = self._contextual_count
+        log.info("event-aware routing context: regime=%s event=%s "
+                 "(%d contextual weight(s))", regime or "unknown", event_type,
+                 self._contextual_count)
+
+        # 4. plan against that context
+        chief = ChiefInvestigator(brain=brain)
+        plans = chief.plan_session(snapshot, agent_weights=routing_weights)
         result.trace.investigation_count = len(plans)
         result.trace.event_count = sum(len(p.events) for p in plans)
         log.info("event brain + chief: %d event(s) → %d investigation(s)",
@@ -510,9 +586,21 @@ class Swarm:
             1 for r in pub.active() if r.revision_count > 0)
         result.trace.recommendations_published = len(pub.active())
         result.trace.review_iterations = pub.review_iterations
+        result.trace.review_incomplete = bool(
+            pub.suppressed and "review did not complete"
+            in (pub.suppression_reason or ""))
         if result.v2 is not None:
             result.trace.degradation_level = str(
                 (result.v2.degradation or {}).get("level", "none"))
+
+            sessions = getattr(result.v2, "review_sessions", []) or []
+            if sessions:
+                result.trace.review_rounds = sum(len(s.rounds) for s in sessions)
+                result.trace.graph_versions = max(s.graph_version for s in sessions)
+                result.trace.evidence_nodes_before_followup = max(
+                    s.nodes_before_followup for s in sessions)
+                result.trace.evidence_nodes_after_followup = max(
+                    s.nodes_after_followup for s in sessions)
 
     def _make_investigator(self, ctx: SwarmContext, result: SwarmResult,
                            loop: asyncio.AbstractEventLoop):
@@ -551,6 +639,9 @@ class Swarm:
                 return current
 
             log.info("follow-up research for %s: running %s", symbol, ", ".join(fresh))
+            result.trace.followup_requests += 1
+            result.trace.followup_agents_selected += len(fresh)
+
             future = asyncio.run_coroutine_threadsafe(
                 self._run_agents(ctx, fresh, result,
                                  "follow-up: requested by review gate"),
@@ -559,10 +650,49 @@ class Swarm:
                 future.result(timeout=self.config.timeout_seconds * 3)
             except Exception as exc:  # noqa: BLE001 — follow-up is best-effort
                 log.warning("follow-up research failed for %s: %s", symbol, exc)
+                result.trace.followup_agents_failed += len(fresh)
                 current["followup_note"] = f"follow-up research failed: {exc}"
+                current["followup_failed"] = True
+                current["followup_error"] = str(exc)[:200]
                 return current
 
-            current["followup_agents"] = fresh
+            produced = [a for a in fresh
+                        if getattr(ctx.reports.get(a), "usable", False)]
+            result.trace.followup_agents_executed += len(produced)
+            result.trace.followup_agents_failed += len(fresh) - len(produced)
+
+            if not produced:
+                # Agents ran and every one of them came back empty. The
+                # requested evidence does not exist, and saying otherwise would
+                # turn an unanswered question into an answered one.
+                current["followup_failed"] = True
+                current["followup_error"] = (
+                    f"{len(fresh)} agent(s) ran and none produced usable evidence")
+                current["followup_agents"] = fresh
+                return current
+
+            # New evidence exists, so the adversary must be re-run against it.
+            # Re-running fusion first means the independence count the red team
+            # complains about actually reflects what arrived; re-running the
+            # red team means round 2 argues with the new picture instead of
+            # replaying round 1's objections.
+            refresh = [a for a in ("cross_verify", "red_team") if a in known]
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._rerun_agents(ctx, refresh, result,
+                                       "refresh: re-attacked after follow-up"),
+                    loop).result(timeout=self.config.timeout_seconds * 3)
+                result.trace.red_team_attempts += 1
+                if getattr(ctx.reports.get("red_team"), "usable", False):
+                    result.trace.red_team_successes += 1
+                else:
+                    result.trace.red_team_failures += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("adversarial refresh failed for %s: %s", symbol, exc)
+                result.trace.red_team_failures += 1
+
+            current["followup_agents"] = produced
+            current.pop("followup_failed", None)
             return current
 
         return investigate
@@ -633,6 +763,8 @@ class Swarm:
                      rec.revision_parent_id, result.trace.orchestration_mode,
                      rec.source_kind))
 
+            self._persist_review_rounds(result)
+
             for rej in pub.rejected:
                 conn.execute(
                     """INSERT OR REPLACE INTO recommendations
@@ -653,6 +785,39 @@ class Swarm:
         except sqlite3.Error as exc:
             log.error("failed to persist recommendations: %s", exc)
 
+    def _persist_review_rounds(self, result: SwarmResult) -> None:
+        """One row per adversarial round, oldest first.
+
+        Round 1 is never overwritten by round 2. After-action review needs to
+        see that an objection was raised, research was demanded, evidence
+        arrived, and the objection was then withdrawn — a single final-state
+        row cannot express any of that.
+        """
+        if result.v2 is None:
+            return
+        sessions = getattr(result.v2, "review_sessions", []) or []
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        try:
+            for session in sessions:
+                for rnd in session.rounds:
+                    self.store.conn.execute(
+                        """INSERT INTO review_rounds
+                           (created_at, run_id, candidate_id, subject, round_number,
+                            graph_version, evidence_nodes, effective_independent,
+                            red_team_execution_status, n_findings, findings,
+                            followup_agents)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (now, result.run_id, getattr(session, "candidate_id", ""),
+                         session.symbol, rnd.get("round", 0),
+                         rnd.get("graph_version", 1), rnd.get("evidence_nodes", 0),
+                         rnd.get("effective_independent"),
+                         rnd.get("execution_status", "completed"),
+                         rnd.get("n_findings", 0),
+                         json.dumps(rnd.get("objections", [])),
+                         json.dumps(rnd.get("followup_agents", []))))
+        except sqlite3.Error as exc:
+            log.error("failed to persist review rounds: %s", exc)
+
     def _persist_trace(self, result: SwarmResult) -> None:
         """Record which architecture actually executed."""
         if result.run_id is None:
@@ -669,8 +834,15 @@ class Swarm:
                     recommendations_rejected, recommendations_published,
                     legacy_fallback_used, degradation_level,
                     learning_context_loaded, memories_loaded,
-                    estimated_cost_units, notes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    estimated_cost_units, notes,
+                    review_rounds, red_team_attempts, red_team_successes,
+                    red_team_failures, review_incomplete, followup_requests,
+                    followup_agents_selected, followup_agents_executed,
+                    followup_agents_failed, evidence_nodes_before_followup,
+                    evidence_nodes_after_followup, graph_versions,
+                    event_context_resolved, contextual_weights_used)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                           ?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (result.run_id, result.run_date.isoformat(),
                  dt.datetime.now(dt.timezone.utc).isoformat(),
                  t.orchestration_mode, t.event_count, t.investigation_count,
@@ -682,7 +854,14 @@ class Swarm:
                  int(t.legacy_fallback_used), t.degradation_level,
                  t.learning_context_loaded, t.memories_loaded,
                  t.estimated_cost_units,
-                 result.publication.suppression_reason or ""))
+                 result.publication.suppression_reason or "",
+                 t.review_rounds, t.red_team_attempts, t.red_team_successes,
+                 t.red_team_failures, int(t.review_incomplete),
+                 t.followup_requests, t.followup_agents_selected,
+                 t.followup_agents_executed, t.followup_agents_failed,
+                 t.evidence_nodes_before_followup, t.evidence_nodes_after_followup,
+                 t.graph_versions, t.event_context_resolved,
+                 t.contextual_weights_used))
             self.store.conn.commit()
         except sqlite3.Error as exc:
             log.error("failed to persist the control-path trace: %s", exc)
@@ -720,11 +899,25 @@ class Swarm:
                     features={
                         "regime": regime,
                         "setup": kind,
+                        # The event type the Event Brain actually classified,
+                        # stored explicitly. Inferring it later from `setup`
+                        # would learn about "stock_setup", which is a shape,
+                        # not a situation — and the two produce different
+                        # contextual buckets.
+                        "event_type": ctx.event_type,
+                        "horizon": "intraday",
+                        "investigation_id": i.get("investigation_id"),
                         "gap_bucket": _gap_bucket(gap),
                         "session_day": result.run_date.strftime("%A"),
                         "strike": i.get("strike"),
                         "expiration": i.get("expiration"),
                         "liquidity": i.get("liquidity"),
+                        "agents_executed": sorted(
+                            k for k, v in result.trace.agent_execution_reason.items()
+                            if not v.startswith("skipped")),
+                        "agents_skipped": sorted(
+                            k for k, v in result.trace.agent_execution_reason.items()
+                            if v.startswith("skipped")),
                     },
                     contributing_agents=contributions,
                 )
@@ -752,7 +945,16 @@ class Swarm:
                     thesis=f"Swarm index read: P(up)={result.probability:.1%}",
                     invalidation="Scored on close vs open, not on a bracket",
                     features={"regime": regime, "setup": "index_direction",
-                              "session_day": result.run_date.strftime("%A")},
+                              "event_type": ctx.event_type, "horizon": "intraday",
+                              "session_day": result.run_date.strftime("%A"),
+                              "agents_executed": sorted(
+                                  k for k, v in
+                                  result.trace.agent_execution_reason.items()
+                                  if not v.startswith("skipped")),
+                              "agents_skipped": sorted(
+                                  k for k, v in
+                                  result.trace.agent_execution_reason.items()
+                                  if v.startswith("skipped"))},
                     contributing_agents=contributions,
                 ),
                 result.run_id,
@@ -780,6 +982,32 @@ class Swarm:
             report_path=str(report_path) if report_path else "",
             notes=f"P(up)={result.probability:.3f} conf={result.confidence}",
         )
+
+
+def _dominant_event_type(events: list) -> str:
+    """The event type this session is really about.
+
+    Highest priority wins, ties broken by count. Returns "any" when the Event
+    Brain classified nothing — an honest absence, not a guessed label, so the
+    resolver falls back through its normal hierarchy instead of routing on a
+    context that was never observed.
+    """
+    if not events:
+        return "any"
+    ranked: dict[str, tuple[int, int]] = {}
+    for e in events:
+        key = getattr(getattr(e, "event_type", None), "value", None)
+        if not key:
+            continue
+        priority = getattr(getattr(e, "priority", None), "rank", None)
+        if priority is None:
+            priority = {"critical": 4, "high": 3, "normal": 2, "low": 1}.get(
+                str(getattr(getattr(e, "priority", ""), "value", "")).lower(), 2)
+        best, count = ranked.get(key, (0, 0))
+        ranked[key] = (max(best, int(priority)), count + 1)
+    if not ranked:
+        return "any"
+    return max(ranked.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
 
 
 def _snapshot_from(reports: dict) -> dict:

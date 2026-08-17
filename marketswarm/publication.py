@@ -64,6 +64,9 @@ class RejectedCandidate:
     audit: list[dict] = field(default_factory=list)
     original_confidence: int = 0
     status: RecordStatus = RecordStatus.REJECTED
+    # Every adversarial round this candidate went through, oldest first.
+    # Round 1 is never overwritten by round 2 — after-action review needs both.
+    review_rounds: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +76,7 @@ class RejectedCandidate:
             "findings": list(self.findings),
             "original_confidence": self.original_confidence,
             "status": self.status.value,
+            "review_rounds": list(self.review_rounds),
             "audit": self.audit,
         }
 
@@ -176,14 +180,33 @@ class PublicationSet:
     def assert_no_leak(self) -> None:
         """Fail loudly if a rejected candidate appears in any active output.
 
+        The identity that matters is the **candidate lineage**, not the
+        recommendation id. In production a recommendation carries a fresh
+        `rec_...` id and a `candidate_id` pointing back at the `cand_...` it
+        was built from, so comparing `rec.id` against the rejected candidate
+        ids compares two namespaces that never collide — a check that can
+        never fire is not a check.
+
         Called on every production run. The cost is a set intersection; the
         thing it prevents is the entire reason 2.0 exists.
         """
-        rejected = {r.candidate_id for r in self.rejected}
+        rejected = {r.candidate_id for r in self.rejected if r.candidate_id}
         for rec in self.active():
-            if rec.id in rejected:
+            # Match on lineage first, then on the raw id, so a recommendation
+            # that never recorded a candidate_id is still caught.
+            for identity in (rec.candidate_id, rec.id):
+                if identity and identity in rejected:
+                    raise PublicationError(
+                        f"rejected candidate {identity} reached the active set as "
+                        f"recommendation {rec.id} ({rec.subject})")
+
+            # A revision descends from a rejected parent only if that parent
+            # was rejected — which would mean the rejection was overturned
+            # without a new review.
+            if rec.revision_parent_id and rec.revision_parent_id in rejected:
                 raise PublicationError(
-                    f"rejected candidate {rec.id} ({rec.subject}) reached the active set")
+                    f"recommendation {rec.id} ({rec.subject}) descends from "
+                    f"rejected candidate {rec.revision_parent_id}")
 
         ids = [r.id for r in self.approved]
         if len(ids) != len(set(ids)):

@@ -2,8 +2,8 @@
 
 "Implemented" means the class exists. "On the production path" means
 `marketswarm run` or `marketswarm score` reaches it without a flag. "E2E
-tested" means a test in `tests/test_control_path.py` drives the real entry
-point and asserts on the observable result — instantiation, a database row, or
+tested" means a test in `tests/test_control_path.py` or
+`tests/test_review_loop_integration.py` drives the real entry point and asserts on the observable result — instantiation, a database row, or
 rendered output — not on a mock.
 
 A component is only complete when all three are yes.
@@ -27,13 +27,22 @@ Legend: **Y** yes · **N** no · **—** not applicable
 
 | Capability | Implemented | On production path | E2E tested | Fallback behaviour | Authoritative source of truth |
 |---|---|---|---|---|---|
-| Evidence Graph | Y | Y — `Pipeline2.build_graph` | Y — follow-up test asserts the graph grows | Empty graph → `effective_independent_evidence` 0 → `INSUFFICIENT_EVIDENCE` | `evidence/graph.py::EvidenceGraph` |
+| Evidence Graph | Y | Y — `Pipeline2.build_graph` | Y — `test_followup_research_grows_the_evidence_graph` asserts node **count and version both increase**, with provenance | Empty graph → `effective_independent_evidence` 0 → `INSUFFICIENT_EVIDENCE` | `evidence/graph.py::EvidenceGraph` |
 | Correlation discount | Y | Y — `effective_independent_count` feeds every recommendation | Y — via conviction assertions | Assumed ρ priors, not estimates (see Limitations) | `evidence/graph.py::CLUSTERS` |
 | Recommendation Engine | Y | Y — the only builder of `Recommendation` | Y — `test_report_renders_with_playbook_and_disclaimer` | Ignorance checked before edge | `recommend/engine.py::Recommendation` |
-| Red Team | Y | Y — `DECISION_AGENTS`, always runs | Y — `test_red_team_objections_reach_the_report` | Absent red team → no findings → APPROVE | `agents/redteam.py` |
+| Red Team | Y | Y — `DECISION_AGENTS`, always runs; **critical to publication** | Y — `test_red_team_objections_reach_the_report` | Absent red team → deterministic fallback, else suppression. **Never APPROVE.** | `agents/redteam.py` |
 | Review Gate | Y | **Y — authoritative** | Y — `test_rejected_recommendation_can_never_reenter_publication_path` | Gate failure ⇒ suppression, never bypass | `review/gate.py::ReviewDecision` |
 | Revision loop | Y | Y — bounded by `max_iterations=2` | Y — `test_modified_recommendation_replaces_the_original` | No-progress guard terminates | `review/loop.py::ReviewOutcome` |
 | Follow-up research | Y | Y — `Swarm._make_investigator` runs real agents | Y — `test_request_more_research_executes_a_real_followup` | No fresh agent → questions published unanswered | `investigation/chief.py::followup_plan` |
+| **Follow-up evidence ingestion** | Y | Y — `CandidateReview.refresh_evidence` rebuilds the graph before the next round | Y — `test_followup_research_grows_the_evidence_graph` (count, version, provenance) | Nothing produced → `followup_failed`, HIGH finding injected | `CandidateReview.graph_version` |
+| **Fresh Red Team after follow-up** | Y | Y — the investigator re-runs `cross_verify` then `red_team` | Y — `test_followup_triggers_a_fresh_red_team_pass` counts agent invocations | Refresh fails → `red_team_failures`, stale objections never silently reused | `review_rounds.red_team_execution_status` |
+| **Red Team execution status** | Y | Y — `redteam_execution_status` on every round | Y — `test_gate_rejects_every_untrustworthy_execution_status` covers all six | Untrustworthy → `REVIEW_INCOMPLETE` | `review/gate.py::ReviewExecutionStatus` |
+| **Review-failure suppression** | Y | Y — `Pipeline2.run` suppresses the whole publication | Y — `test_red_team_failure_suppresses_publication` checks report, JSON, DB, API, webhook, monitor | Deterministic fallback first; then suppress | `PublicationSet.suppression_reason` |
+| **Deterministic fallback reviewer** | Y | Y — used when the agent does not complete | Y — `test_red_team_failure_falls_back_to_deterministic_review` | Produces nothing → suppress | `review/fallback.py` |
+| **Review round history** | Y | Y — persisted per round | Y — `test_each_round_is_preserved_not_overwritten` | Round 1 never overwritten | `review_rounds` table |
+| **Event-aware contextual routing** | Y | Y — stage 2 resolves after the Event Brain | Y — `test_event_specific_weights_change_which_agents_execute` asserts **execution**, not weights | Unclassified → `event=any`, hierarchical backoff | `ControlPathTrace.event_context_resolved` |
+| **Event context persisted for learning** | Y | Y — `features.event_type` written explicitly | Y — `test_event_context_is_persisted_for_later_learning` | Absent → falls back to `setup` | `predictions.features` |
+| **Candidate/recommendation lineage** | Y | Y — `assert_no_leak` matches on `candidate_id` | Y — `test_leak_check_uses_candidate_lineage_not_recommendation_id` with `rec_456` / `cand_123` | Also checks `revision_parent_id` | `publication.py::assert_no_leak` |
 
 ## Publication and persistence
 
@@ -84,6 +93,8 @@ Legend: **Y** yes · **N** no · **—** not applicable
 | Item | Status | Why |
 |---|---|---|
 | Circuit-breaker open path | Wired, not E2E tested | The wiring and the skip reason are covered; no test yet forces a breaker open across a full run |
+| Red-team refresh *inside* one candidate's loop | Wired, tested at run level | The re-run is triggered once per follow-up and shared across candidates in that run, not re-run per candidate |
+| Sector context | Column exists, always `any` | The event brain does not classify sector; the column is reserved rather than populated |
 | LLM routing under a live key | Wired, not E2E tested | Would require a real API call in CI |
 | `Observatory.trace_agent` | Available, unused by the orchestrator | Per-agent DB traces are written by `record_report`; the finer-grained context manager is not on the path |
 | Cluster correlation priors | Assumed, not estimated | `CLUSTERS` holds defensible priors, not measurements from realised data |

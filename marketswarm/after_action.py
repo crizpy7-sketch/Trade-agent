@@ -42,6 +42,9 @@ class AfterActionReview:
     evidence_mattered: list[str] = field(default_factory=list)
     evidence_noise: list[str] = field(default_factory=list)
     red_team_performance: str = ""
+    # Whether the follow-up research changed anything. Empty when the
+    # candidate only ever went through one round.
+    research_verdict: str = ""
     calibration_error: float | None = None
     lesson: str = ""
     taxonomy: list[MistakeTaxonomy] = field(default_factory=list)
@@ -71,6 +74,8 @@ class AfterActionReview:
                 lines.extend(f"    - {i}" for i in items[:5])
         if self.red_team_performance:
             lines.append(f"  RED TEAM            {self.red_team_performance}")
+        if self.research_verdict:
+            lines.append(f"  FOLLOW-UP           {self.research_verdict}")
         lines.append(f"  LESSON              {self.lesson}")
         lines.append(f"  BECOMES MEMORY      {'yes' if self.should_become_memory else 'no'}")
         lines.append(f"  TRIGGERS EXPERIMENT {'yes' if self.should_trigger_experiment else 'no'}")
@@ -86,6 +91,7 @@ class AfterActionReview:
             "evidence_mattered": self.evidence_mattered,
             "evidence_noise": self.evidence_noise,
             "red_team_performance": self.red_team_performance,
+            "research_verdict": self.research_verdict,
             "calibration_error": self.calibration_error,
             "lesson": self.lesson,
             "taxonomy": [t.value for t in self.taxonomy],
@@ -110,6 +116,7 @@ class AfterActionReviewer:
         contributions: dict[str, float] | None = None,
         evidence: list[dict] | None = None,
         red_team_findings: list[dict] | None = None,
+        review_rounds: list[dict] | None = None,
     ) -> AfterActionReview:
         subject = recommendation.get("subject") or recommendation.get("symbol", "?")
         forecast = float(recommendation.get("forecast_probability")
@@ -170,11 +177,45 @@ class AfterActionReviewer:
             aar.got_wrong.extend(t.value.replace("_", " ") for t in aar.taxonomy)
             aar.lesson = self._lesson(subject, aar.taxonomy, realized_r, forecast)
 
+        aar.research_verdict = self._research_verdict(review_rounds or [])
+
         avoidable = MistakeTaxonomy.UNPREDICTABLE not in aar.taxonomy
         aar.should_become_memory = (not correct) and avoidable
         aar.should_trigger_experiment = (
             aar.should_become_memory and self._is_recurring(aar.taxonomy))
         return aar
+
+    @staticmethod
+    def _research_verdict(rounds: list[dict]) -> str:
+        """Was the follow-up research worth what it cost?
+
+        Answerable only because every round is preserved with its graph version
+        and finding count. A single final-state record could not distinguish
+        "the objection was resolved by evidence" from "the objection was never
+        raised", and those imply opposite process changes.
+        """
+        if len(rounds) < 2:
+            return ""
+
+        first, last = rounds[0], rounds[-1]
+        gained = last.get("evidence_nodes", 0) - first.get("evidence_nodes", 0)
+        versioned = last.get("graph_version", 1) > first.get("graph_version", 1)
+        delta = last.get("n_findings", 0) - first.get("n_findings", 0)
+        agents = last.get("followup_agents") or []
+
+        if not versioned and not gained:
+            return ("follow-up research was requested and the evidence state never "
+                    "changed — budget spent for no information")
+        if delta < 0:
+            return (f"follow-up ({', '.join(agents) or 'unnamed agents'}) added "
+                    f"{gained} evidence node(s) and resolved {abs(delta)} "
+                    f"objection(s) — the research paid for itself")
+        if delta > 0:
+            return (f"follow-up added {gained} evidence node(s) and raised "
+                    f"{delta} new objection(s) — the research changed the answer "
+                    f"for the better even though it argued against the thesis")
+        return (f"follow-up added {gained} evidence node(s) and left the "
+                f"objections unchanged — the new evidence did not bear on them")
 
     def _classify(self, rec: dict, forecast: float, confidence: int,
                   realized_r: float, evidence: list[dict]) -> list[MistakeTaxonomy]:

@@ -19,7 +19,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .gate import Finding, ReviewDecision, ReviewGate, ReviewStatus, Severity
+from .gate import (Finding, ReviewDecision, ReviewExecutionStatus, ReviewGate,
+                   ReviewStatus, Severity)
 
 log = logging.getLogger("marketswarm.review.loop")
 
@@ -27,6 +28,32 @@ log = logging.getLogger("marketswarm.review.loop")
 # can be tested without agents, an LLM, or a network.
 Critic = Callable[[dict, int], list[Finding]]
 Investigator = Callable[[dict, list[str]], dict]
+
+
+@dataclass
+class CriticResult:
+    """What one adversarial pass produced, and the state it was produced from.
+
+    A bare list of findings cannot answer the two questions that matter after
+    follow-up research: did the reviewer actually run, and did it look at the
+    new evidence? Carrying the execution status and the evidence-graph version
+    alongside the findings makes both auditable, and makes a stale second round
+    detectable instead of invisible.
+
+    A critic may still return a plain list; `CriticResult.of` normalises it.
+    """
+
+    findings: list[Finding] = field(default_factory=list)
+    execution_status: ReviewExecutionStatus = ReviewExecutionStatus.COMPLETED
+    graph_version: int = 0
+    evidence_nodes: int = 0
+    note: str = ""
+
+    @classmethod
+    def of(cls, raw) -> "CriticResult":
+        if isinstance(raw, CriticResult):
+            return raw
+        return cls(findings=list(raw))
 
 
 @dataclass
@@ -39,12 +66,28 @@ class RevisionRecord:
     created_at: str = field(
         default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat()
     )
+    # Which evidence state this round saw. Round 2 carrying the same version as
+    # round 1 means the follow-up bought nothing, and that is worth recording
+    # rather than inferring.
+    graph_version: int = 0
+    evidence_nodes: int = 0
+    execution_status: str = ReviewExecutionStatus.COMPLETED.value
+    agents_executed: list[str] = field(default_factory=list)
+
+    @property
+    def round_number(self) -> int:
+        return self.iteration + 1
 
     def to_dict(self) -> dict:
         return {
             "iteration": self.iteration,
+            "round_number": self.round_number,
             "stage": self.stage,
             "created_at": self.created_at,
+            "graph_version": self.graph_version,
+            "evidence_nodes": self.evidence_nodes,
+            "execution_status": self.execution_status,
+            "agents_executed": list(self.agents_executed),
             "decision": self.decision.to_dict() if self.decision else None,
             "findings": [f.to_dict() for f in self.findings],
             "snapshot": self.snapshot,
@@ -125,17 +168,34 @@ class ReviewLoop:
         i = 0
 
         for i in range(self.max_iterations):
-            findings = list(critic(current, i))
+            # A fresh adversarial pass against whatever the evidence state is
+            # *now*. The critic re-derives findings each round; it does not
+            # replay a cached objection set.
+            result = CriticResult.of(critic(current, i))
+            findings = list(result.findings)
+
             decision = self.gate.review(
                 findings,
                 original_confidence=int(current.get("confidence", 50)),
                 iteration=i,
                 max_iterations=self.max_iterations,
                 evidence_already_requested=evidence_requested,
+                execution_status=result.execution_status,
             )
-            history.append(RevisionRecord(i, "red_team", decision, findings,
-                                          copy.deepcopy(current)))
-            log.info("review iter %d: %s", i, decision.summary())
+            history.append(RevisionRecord(
+                i, "red_team", decision, findings, copy.deepcopy(current),
+                graph_version=result.graph_version,
+                evidence_nodes=result.evidence_nodes,
+                execution_status=result.execution_status.value,
+                agents_executed=list(current.get("followup_agents", [])),
+            ))
+            log.info("review round %d: %s [graph v%d, %d nodes, review %s]",
+                     i + 1, decision.summary(), result.graph_version,
+                     result.evidence_nodes, result.execution_status.value)
+
+            if decision.status is ReviewStatus.REVIEW_INCOMPLETE:
+                terminated = f"adversarial review did not complete ({result.execution_status.value})"
+                return ReviewOutcome(rec_id, None, decision, history, i + 1, terminated)
 
             if decision.status is ReviewStatus.REJECT:
                 terminated = "rejected by review gate"
@@ -171,10 +231,17 @@ class ReviewLoop:
                     except Exception as exc:  # noqa: BLE001 — investigation is best-effort
                         log.warning("follow-up investigation failed: %s", exc)
                         current["open_questions"] = list(decision.required_followups)
+                        # A failed investigation is not a satisfied one. The
+                        # next round must see that the demanded evidence never
+                        # arrived, or the loop launders a request into an
+                        # answer by doing nothing.
+                        current["followup_failed"] = True
+                        current["followup_error"] = str(exc)[:200]
                 else:
                     # No investigator wired: the questions stay open and are
                     # published as unresolved rather than quietly dropped.
                     current["open_questions"] = list(decision.required_followups)
+                    current["followup_failed"] = True
                 current["confidence"] = decision.revised_confidence
                 history.append(RevisionRecord(i, "revision", decision, [],
                                               copy.deepcopy(current)))
@@ -203,6 +270,34 @@ class ReviewLoop:
                                       copy.deepcopy(final or {})))
         return ReviewOutcome(rec_id, final, decision, history, self.max_iterations,
                              terminated)
+
+
+def redteam_execution_status(report) -> ReviewExecutionStatus:
+    """Did the adversarial review actually run, and is its output usable?
+
+    Read from the agent report rather than inferred from the findings list,
+    because the whole point is that an empty findings list is ambiguous.
+    """
+    if report is None:
+        return ReviewExecutionStatus.UNAVAILABLE
+
+    status = str(getattr(report, "status", "") or "").lower()
+    if status in ("timeout", "timed_out"):
+        return ReviewExecutionStatus.TIMED_OUT
+    if status in ("error", "failed"):
+        return ReviewExecutionStatus.FAILED
+    if status == "skipped":
+        return ReviewExecutionStatus.UNAVAILABLE
+    if not getattr(report, "usable", False):
+        return ReviewExecutionStatus.FAILED
+
+    data = getattr(report, "data", None)
+    if not isinstance(data, dict) or "objections" not in data:
+        # The agent claims success but produced nothing the gate can read.
+        # Silently treating that as "no objections" is the bug this guards.
+        return ReviewExecutionStatus.INVALID
+
+    return ReviewExecutionStatus.COMPLETED
 
 
 def findings_from_redteam_report(report, symbol: str | None = None) -> list[Finding]:

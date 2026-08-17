@@ -130,6 +130,11 @@ class Recommendation:
     evidence_graph_id: str | None = None
     review_decision_id: str | None = None
     revision_parent_id: str | None = None
+    graph_version: int = 1
+    review_execution_status: str = "completed"
+    review_rounds: list[dict] = field(default_factory=list)
+    event_type: str = "any"
+    sector: str = "any"
 
     # Presentation only. Carries the option strike, expiration and premium
     # zones the engine has no opinion about. Every decision-bearing field in
@@ -171,7 +176,7 @@ class EnginePolicy:
 
 class RecommendationEngine:
     def __init__(self, policy: EnginePolicy | None = None,
-                 system_version: str = "2.0.1"):
+                 system_version: str = "2.0.2"):
         self.policy = policy or EnginePolicy()
         self.system_version = system_version
 

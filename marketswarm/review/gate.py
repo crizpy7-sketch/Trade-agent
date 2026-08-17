@@ -41,21 +41,52 @@ class Severity(str, Enum):
         return {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}[self.value]
 
 
+class ReviewExecutionStatus(str, Enum):
+    """Did the adversarial review actually run?
+
+    This is a separate axis from *what the review concluded*, and conflating
+    the two is a safety hole: an empty findings list means "reviewed, nothing
+    found" only when the reviewer completed. If it crashed, timed out, or was
+    never available, an empty list means nothing at all — and treating it as a
+    clean bill of health publishes an unreviewed recommendation.
+    """
+
+    COMPLETED = "completed"                  # ran, produced a verdict
+    COMPLETED_BY_FALLBACK = "completed_by_fallback"   # deterministic reviewer
+    FAILED = "failed"                        # raised
+    UNAVAILABLE = "unavailable"              # never ran / not in the report set
+    TIMED_OUT = "timed_out"
+    INVALID = "invalid"                      # ran but the output is unusable
+
+    @property
+    def is_trustworthy(self) -> bool:
+        """Only these two permit an empty findings list to mean 'clean'."""
+        return self in (ReviewExecutionStatus.COMPLETED,
+                        ReviewExecutionStatus.COMPLETED_BY_FALLBACK)
+
+
 class ReviewStatus(str, Enum):
     APPROVE = "APPROVE"
     APPROVE_WITH_REDUCED_CONFIDENCE = "APPROVE_WITH_REDUCED_CONFIDENCE"
     REQUEST_MORE_RESEARCH = "REQUEST_MORE_RESEARCH"
     MODIFY = "MODIFY"
     REJECT = "REJECT"
+    # The reviewer did not complete. Distinct from REJECT, which is a verdict:
+    # this is the absence of one, and it must never be mistaken for approval.
+    REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
 
     @property
     def survives(self) -> bool:
         """Does the idea live on in some form?"""
-        return self is not ReviewStatus.REJECT
+        return self not in (ReviewStatus.REJECT, ReviewStatus.REVIEW_INCOMPLETE)
 
     @property
     def needs_another_pass(self) -> bool:
         return self in (ReviewStatus.REQUEST_MORE_RESEARCH, ReviewStatus.MODIFY)
+
+    @property
+    def blocks_publication(self) -> bool:
+        return self in (ReviewStatus.REJECT, ReviewStatus.REVIEW_INCOMPLETE)
 
 
 @dataclass
@@ -159,9 +190,28 @@ class ReviewGate:
         iteration: int = 0,
         max_iterations: int = 2,
         evidence_already_requested: bool = False,
+        execution_status: ReviewExecutionStatus = ReviewExecutionStatus.COMPLETED,
     ) -> ReviewDecision:
         p = self.policy
         conf = int(max(0, min(100, original_confidence)))
+
+        # An unreviewed candidate is not an approved one. This check comes
+        # first because every branch below assumes the findings list is a
+        # statement about the idea, which it only is when a reviewer produced
+        # it. `execution_status` defaults to COMPLETED so a caller that has
+        # already verified the reviewer ran does not have to say so twice;
+        # production always passes the measured value.
+        if not execution_status.is_trustworthy:
+            return ReviewDecision(
+                status=ReviewStatus.REVIEW_INCOMPLETE,
+                original_confidence=conf,
+                revised_confidence=0,
+                severity=Severity.CRITICAL,
+                reasons=[f"adversarial review did not complete "
+                         f"({execution_status.value}) — an unreviewed idea is "
+                         f"not an approved one"],
+                iteration=iteration,
+            )
 
         if not findings:
             return ReviewDecision(

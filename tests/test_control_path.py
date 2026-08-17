@@ -412,14 +412,15 @@ def test_chief_plans_before_specialists_execute(swarm_factory, monkeypatch):
 
 def test_request_more_research_executes_a_real_followup(swarm_factory, monkeypatch):
     """The gate asks for evidence; agents must actually run to get it."""
-    from marketswarm.review.gate import (ReviewDecision, ReviewGate,
-                                         ReviewStatus, Severity)
+    from marketswarm.review.gate import (ReviewDecision, ReviewExecutionStatus,
+                                         ReviewGate, ReviewStatus, Severity)
 
     calls = {"n": 0}
     original_review = ReviewGate.review
 
     def demanding(self, findings, original_confidence, iteration=0,
-                  max_iterations=2, evidence_already_requested=False):
+                  max_iterations=2, evidence_already_requested=False,
+                  execution_status=ReviewExecutionStatus.COMPLETED):
         # First pass always demands research, so the follow-up path is taken.
         if iteration == 0 and not evidence_already_requested:
             calls["n"] += 1
@@ -433,7 +434,8 @@ def test_request_more_research_executes_a_real_followup(swarm_factory, monkeypat
                                     "corroborate the headline with a second source"],
                 iteration=iteration)
         return original_review(self, findings, original_confidence, iteration,
-                               max_iterations, evidence_already_requested)
+                               max_iterations, evidence_already_requested,
+                               execution_status)
 
     monkeypatch.setattr(ReviewGate, "review", demanding)
 
@@ -655,11 +657,12 @@ def _champion_of(conn):
 
 def test_scenario_a_red_team_rejects_everything(swarm_factory, monkeypatch):
     """Nothing may leak when every candidate is rejected."""
-    from marketswarm.review.gate import (ReviewDecision, ReviewGate,
-                                         ReviewStatus, Severity)
+    from marketswarm.review.gate import (ReviewDecision, ReviewExecutionStatus,
+                                         ReviewGate, ReviewStatus, Severity)
 
     def reject_all(self, findings, original_confidence, iteration=0,
-                   max_iterations=2, evidence_already_requested=False):
+                   max_iterations=2, evidence_already_requested=False,
+                   execution_status=None):
         return ReviewDecision(
             status=ReviewStatus.REJECT, original_confidence=original_confidence,
             revised_confidence=0, severity=Severity.CRITICAL,

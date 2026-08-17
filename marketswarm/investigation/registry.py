@@ -48,6 +48,22 @@ class AgentCapability:
         return (matches * max(self.historical_reliability, 0.05)) / max(self.expected_cost, 0.1)
 
 
+# An optional agent whose measured contribution has fallen to (or near) the
+# learning layer's weight floor has been shown to subtract value in this
+# context, over at least `MIN_OBSERVATIONS` resolved outcomes. Running it anyway
+# spends budget to make the answer worse.
+#
+# Without this, a learned weight could only ever change the *order* in which
+# agents were considered — and since the budget rarely binds on a busy session,
+# ordering changed nothing at all. Learning that cannot change behaviour is not
+# learning.
+#
+# `always_run` agents are never excluded on reliability: losing fusion or
+# levels breaks the report outright, which is worse than a weak signal. The
+# floor sits above `WEIGHT_FLOOR` (0.15) so only agents pinned at the bottom by
+# real evidence are dropped, never merely below-average ones.
+UNRELIABLE_THRESHOLD = 0.25
+
 _E = EventType
 
 DEFAULT_CAPABILITIES: list[AgentCapability] = [
@@ -256,7 +272,9 @@ class CapabilityRegistry:
 
         optional = [
             c for c in self._caps.values()
-            if not c.always_run and c.name not in exclude and c.value_score(event_types) > 0
+            if not c.always_run and c.name not in exclude
+            and c.value_score(event_types) > 0
+            and c.historical_reliability > UNRELIABLE_THRESHOLD
         ]
         optional.sort(key=lambda c: -c.value_score(event_types))
 

@@ -32,10 +32,19 @@ sqlite3 ~/.marketswarm/marketswarm.db \
 `Swarm._resolve_agent_weights` → `memory/resolver.py::ContextualWeightResolver`
 
 Contextual contribution first, global Brier weight as fallback, 1.0 for
-anything never measured. This one call is where the previous session's scoring
-enters this session. The resulting dict is used **twice** — for routing (via
-the capability registry) and for fusion (via `ctx.agent_weights`) — because two
-independent opinions about the same agent is how a system contradicts itself.
+anything never measured. This is where the previous session's scoring enters
+this session.
+
+**Called twice, deliberately.** Stage 1 runs here, before the scan, with the
+previous session's regime and no event type. Stage 2 runs in §4 below, once the
+Event Brain has classified today — and *that* is the resolution that routes.
+Resolving only once, before detection, meant the store could hold "options_flow
+is worth 1.6 around earnings" and the run could never ask for it, because at
+resolution time it did not yet know it was an earnings day.
+
+The stage-2 dict is used for both routing (via the capability registry) and
+fusion (via `ctx.agent_weights`), because two independent opinions about the
+same agent is how a system contradicts itself.
 
 Also loaded: `learning.load_calibrator()`, `store.active_lessons()`.
 
@@ -59,6 +68,18 @@ there is exactly one snapshot builder) → `investigation/event_brain.py::EventB
 
 Deterministic detectors only. No model call decides whether something happened.
 
+### 3b. Resolve the event context, then route on it
+
+`EventBrain.scan(snapshot)` → `orchestrator._dominant_event_type(events)` →
+`_resolve_agent_weights(regime, event_type)` (stage 2).
+
+The dominant event type is the highest-priority one detected, ties broken by
+count, and `"any"` when nothing was classified — an honest absence rather than
+a guessed label, so the resolver falls through its normal hierarchy instead of
+routing on a context that was never observed.
+
+Recorded as `ControlPathTrace.event_context_resolved`.
+
 ### 4. Plan
 
 `investigation/chief.py::ChiefInvestigator.plan_session(snapshot, agent_weights)`
@@ -73,6 +94,12 @@ Produces `InvestigationPlan`s with hypotheses, priority and a `PlanBudget`
 Called from inside `_build_plan`. `update_reliability(agent_weights)` is applied
 first, so a learned weight changes what gets run. Returns `(selected, skipped)`
 and pulls in declared dependencies.
+
+An optional agent whose measured reliability has fallen to
+`registry.UNRELIABLE_THRESHOLD` (0.25) is **excluded**, not merely ranked last.
+Before that, a learned weight could only change the order in which agents were
+considered — and since the budget rarely binds on a busy session, ordering
+changed nothing at all. `always_run` agents are never excluded on reliability.
 
 ### 6. Execute the selected specialists
 
@@ -102,8 +129,12 @@ build_graph            evidence/graph.py     clustered, ρ-discounted
 build_recommendations  recommend/engine.py   ignorance checked before edge
   └─ per candidate:
        review/loop.py::ReviewLoop.run(idea, critic, investigator)
-            critic       = review/loop.py::findings_from_redteam_report
-            investigator = Swarm._make_investigator   ← real follow-up research
+            critic       = pipeline2.py::CandidateReview.critic
+                           ← re-reads the CURRENT graph and the CURRENT
+                             red-team report every round; nothing is cached
+            investigator = pipeline2.py::CandidateReview.investigate
+                           → Swarm._make_investigator  ← runs real agents,
+                             then re-runs cross_verify + red_team
             gate         = review/gate.py::ReviewGate.review
 ```
 
@@ -114,17 +145,34 @@ The gate's five outcomes:
 | `APPROVE` | published as-is |
 | `APPROVE_WITH_REDUCED_CONFIDENCE` | `gate.apply` rewrites confidence, then published |
 | `MODIFY` | modifications applied, then published |
-| `REQUEST_MORE_RESEARCH` | `Swarm._make_investigator` asks `chief.followup_plan` which agents answer the open questions, runs the ones that have not run, loops again — bounded by the plan budget, the iteration cap, and the rule that an agent never re-runs in one session |
+| `REQUEST_MORE_RESEARCH` | `Swarm._make_investigator` asks `chief.followup_plan` which agents answer the open questions and runs the ones that have not run. If any produce usable evidence, the graph is **rebuilt** (`graph_version` increments) and `cross_verify` + `red_team` are **re-run**, so the next round argues against the new picture. If none do, `followup_failed` is set and the next round receives a HIGH finding saying the demanded corroboration never arrived. |
 | `REJECT` | `outcome.final_idea is None` → a `RejectedCandidate`, never a recommendation |
+| `REVIEW_INCOMPLETE` | the reviewer did not complete — see below. Not a verdict, so the candidate is stored `SUPPRESSED`, not `REJECTED`, and the whole publication is suppressed. |
+
+**Adversarial review must succeed.** `redteam_execution_status(report)` classifies
+every round as `COMPLETED`, `COMPLETED_BY_FALLBACK`, `FAILED`, `UNAVAILABLE`,
+`TIMED_OUT` or `INVALID`. `ReviewGate.review` treats an empty findings list as
+clean **only** for the first two. When the agent does not complete,
+`review/fallback.py::deterministic_review` runs the structural checks directly
+from the reports; if that also yields nothing, publication is suppressed with a
+stated reason. `red_team` is in `resilience.CRITICAL_AGENTS`.
+
+Full state machine, including every failure case:
+`docs/REVIEW_AND_FOLLOWUP_STATE_MACHINE.md`.
 
 ### 9. The publication authority
 
 `publication.py::PublicationSet`
 
 Built by `Pipeline2.run` and immediately checked by `assert_no_leak()`, which
-raises `PublicationError` if a rejected candidate id appears in the active set,
-if an id is duplicated, or if the legacy view disagrees with its own
-recommendation about confidence.
+raises `PublicationError` if:
+
+- an active recommendation's **`candidate_id`** appears among the rejected
+  candidate ids (matching on `rec.id` instead was a no-op, because `rec_...`
+  and `cand_...` are different namespaces and never collide),
+- its `revision_parent_id` descends from a rejected candidate,
+- an id is duplicated, or
+- the legacy view disagrees with its own recommendation about confidence.
 
 **Everything downstream reads this object and nothing else.**
 
@@ -226,5 +274,15 @@ If someone reintroduces one, these are the tripwires:
 4. `agent_execution_reason` carries a reason for every one of the 16 agents.
 5. `recommendations.status` distinguishes `APPROVED` from `REJECTED`; the API's
    `ACTIVE_STATUSES` filter means a rejected row cannot be served as live.
-6. `tests/test_control_path.py` — 29 tests that drive `Swarm.run()` and assert
-   on instantiation, database rows and rendered output.
+6. `tests/test_control_path.py` and `tests/test_review_loop_integration.py` —
+   56 tests that drive `Swarm.run()` and assert on instantiation, database
+   rows and rendered output.
+7. `run_control_path.graph_versions == 1` on a run with
+   `followup_requests > 0` means follow-up research bought evidence that never
+   reached a second round — the 2.0.1 stale-loop bug returning.
+8. `review_rounds.red_team_execution_status` is recorded per round. Anything
+   other than `completed` / `completed_by_fallback` must coincide with a
+   suppressed publication.
+9. `run_control_path.event_context_resolved` shows which (regime, event) the
+   session actually routed on. `event=any` on a session with detected events
+   means stage-2 resolution did not happen.

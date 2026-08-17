@@ -183,7 +183,41 @@ class ClosedLoop:
         realized = float(num("realized_r", 0.0))
         outcome = int(num("outcome", 0))
         return self.reviewer.review(rec, realized_r=realized, outcome=outcome,
-                                    contributions=contributions)
+                                    contributions=contributions,
+                                    review_rounds=self._rounds_for(row))
+
+    def _rounds_for(self, row: sqlite3.Row) -> list[dict]:
+        """The adversarial rounds this prediction's candidate went through.
+
+        Matched by symbol and run date rather than by id, because a prediction
+        row predates the recommendation it came from in the 1.x schema. Returns
+        an empty list when nothing matches, which the reviewer reads as "one
+        round only" — an absence, not a claim.
+        """
+        keys = row.keys()
+        if "symbol" not in keys or "run_date" not in keys:
+            return []
+        try:
+            rounds = self.conn.execute(
+                """SELECT r.round_number, r.graph_version, r.evidence_nodes,
+                          r.n_findings, r.followup_agents
+                   FROM review_rounds r
+                   JOIN run_control_path p ON p.run_id = r.run_id
+                   WHERE r.subject = ? AND p.run_date = ?
+                   ORDER BY r.round_number""",
+                (row["symbol"], row["run_date"])).fetchall()
+        except sqlite3.Error:
+            return []
+        out = []
+        for rnd, version, nodes, n_findings, agents in rounds:
+            try:
+                followup = json.loads(agents or "[]")
+            except (json.JSONDecodeError, TypeError):
+                followup = []
+            out.append({"round": rnd, "graph_version": version,
+                        "evidence_nodes": nodes, "n_findings": n_findings,
+                        "followup_agents": followup})
+        return out
 
     def _weight_snapshot(self) -> dict[str, float]:
         return {

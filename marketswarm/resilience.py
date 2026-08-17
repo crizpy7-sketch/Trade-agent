@@ -203,6 +203,7 @@ class DegradationLevel(str, Enum):
 CRITICAL_AGENTS: frozenset[str] = frozenset({
     "technicals",       # no levels ⇒ no brackets
     "cross_verify",     # no fusion ⇒ no probability
+    "red_team",         # no adversary ⇒ no reviewed recommendation
 })
 
 # Losing one of these invalidates a specific *class* of output only.

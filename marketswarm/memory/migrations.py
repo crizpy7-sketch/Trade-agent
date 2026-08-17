@@ -434,7 +434,62 @@ CREATE INDEX IF NOT EXISTS idx_rcp_date ON run_control_path(run_date);
 """)
 
 
-MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005]
+# 006 — review rounds, evidence versions and the event context.
+#
+# 2.0.1 could tell you a candidate was reviewed. It could not tell you how many
+# times, against which evidence state, or whether the reviewer actually ran —
+# and it recorded no event type, so contextual learning had to guess one from
+# the setup string. All three are now stored explicitly.
+M006 = Migration(6, "review_rounds_and_event_context", """
+CREATE TABLE IF NOT EXISTS review_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    run_id INTEGER,
+    candidate_id TEXT NOT NULL,
+    recommendation_id TEXT,
+    subject TEXT NOT NULL,
+    round_number INTEGER NOT NULL,
+    graph_version INTEGER NOT NULL DEFAULT 1,
+    evidence_nodes INTEGER DEFAULT 0,
+    effective_independent REAL,
+    red_team_execution_status TEXT NOT NULL,
+    n_findings INTEGER DEFAULT 0,
+    findings TEXT,
+    requested_research TEXT,
+    followup_agents TEXT,
+    decision TEXT,
+    confidence_before INTEGER,
+    confidence_after INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rr_candidate ON review_rounds(candidate_id, round_number);
+CREATE INDEX IF NOT EXISTS idx_rr_run ON review_rounds(run_id);
+
+ALTER TABLE recommendations ADD COLUMN graph_version INTEGER DEFAULT 1;
+ALTER TABLE recommendations ADD COLUMN review_execution_status TEXT DEFAULT 'completed';
+ALTER TABLE recommendations ADD COLUMN review_round_count INTEGER DEFAULT 1;
+ALTER TABLE recommendations ADD COLUMN event_type TEXT DEFAULT 'any';
+ALTER TABLE recommendations ADD COLUMN sector TEXT DEFAULT 'any';
+ALTER TABLE recommendations ADD COLUMN horizon_context TEXT DEFAULT 'intraday';
+CREATE INDEX IF NOT EXISTS idx_rec_event ON recommendations(event_type, run_date);
+
+ALTER TABLE run_control_path ADD COLUMN review_rounds INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN red_team_attempts INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN red_team_successes INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN red_team_failures INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN review_incomplete INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN followup_requests INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN followup_agents_selected INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN followup_agents_executed INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN followup_agents_failed INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN evidence_nodes_before_followup INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN evidence_nodes_after_followup INTEGER DEFAULT 0;
+ALTER TABLE run_control_path ADD COLUMN graph_versions INTEGER DEFAULT 1;
+ALTER TABLE run_control_path ADD COLUMN event_context_resolved TEXT DEFAULT 'any';
+ALTER TABLE run_control_path ADD COLUMN contextual_weights_used INTEGER DEFAULT 0;
+""")
+
+
+MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005, M006]
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
 
 

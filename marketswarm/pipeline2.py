@@ -44,20 +44,169 @@ from .recommend.engine import (
     RecommendationInputs,
 )
 from .resilience import DegradationTracker
-from .review.gate import ReviewGate
-from .review.loop import ReviewLoop, findings_from_redteam_report
+from .publication import RecordStatus
+from .review.fallback import deterministic_review
+from .review.gate import (Finding, ReviewExecutionStatus, ReviewGate, ReviewStatus,
+                          Severity)
+from .review.loop import (CriticResult, ReviewLoop, findings_from_redteam_report,
+                          redteam_execution_status)
 
 log = logging.getLogger("marketswarm.pipeline2")
 
 
-def _bind_investigator(investigator, symbol: str, plan):
-    """Adapt the orchestrator's investigator to the review loop's signature.
+class CandidateReview:
+    """Per-candidate review state, refreshed between rounds.
 
-    The loop calls `investigator(idea, questions)`; the orchestrator needs the
-    symbol and the parent plan to scope and budget the follow-up.
+    This class exists because of a specific defect. Before it, the evidence
+    graph was built once for the whole session and the red-team report was
+    captured once into a closure. Follow-up research genuinely ran agents and
+    genuinely wrote new reports — and round 2 then re-derived its objections
+    from the same captured report object, producing byte-identical findings.
+    The loop's own no-progress guard then terminated, so the research was
+    guaranteed to be wasted by construction.
+
+    The fix is that a round reads the *current* state:
+
+        critic()  →  refresh graph from live reports (if they changed)
+                  →  re-derive findings from the current red-team report
+                  →  report the execution status and graph version
+
+    `reports` is the live dict the orchestrator mutates, so an agent that runs
+    during follow-up is visible here immediately.
     """
+
+    def __init__(self, pipeline: "Pipeline2", reports: dict, symbol: str,
+                 graph: EvidenceGraph, plan, investigator=None):
+        self.pipeline = pipeline
+        self.reports = reports
+        self.symbol = symbol
+        self.graph = graph
+        self.plan = plan
+        self.investigator = investigator
+
+        self.graph_version = 1
+        self.dirty = False                      # new reports since the last graph build
+        self.independent = self._independence()
+        self.rounds: list[dict] = []
+        self.last_status = ReviewExecutionStatus.COMPLETED
+        self.followup_agents: list[str] = []
+        self.followup_failures: list[str] = []
+        self.nodes_before_followup = len(graph.nodes)
+        self.nodes_after_followup = len(graph.nodes)
+        self.candidate_id = ""
+
+    # ------------------------------------------------------------------
+
+    def _independence(self) -> float:
+        nodes = self.graph.by_subject(self.symbol) or list(self.graph.nodes.values())
+        return self.graph.effective_independent_count(nodes)
+
+    def refresh_evidence(self) -> None:
+        """Rebuild the graph from the current reports.
+
+        Option B from the two the design allowed: a full rebuild rather than
+        incremental ingestion. `build_graph` is already a pure function of the
+        report set, so rebuilding is both simpler and safer than maintaining a
+        second insertion path that could disagree with it. The cost is a few
+        hundred node constructions on a session that asked for more research —
+        which is not the hot path.
+        """
+        self.graph = self.pipeline.build_graph(self.reports)
+        self.graph_version += 1
+        self.independent = self._independence()
+        self.nodes_after_followup = len(self.graph.nodes)
+        self.dirty = False
+        log.info("evidence refreshed for %s: graph v%d, %d nodes, "
+                 "%.2f effective independent", self.symbol, self.graph_version,
+                 len(self.graph.nodes), self.independent)
+
+    # ------------------------------------------------------------------
+
+    def critic(self, current: dict, iteration: int) -> CriticResult:
+        """One adversarial pass against the current evidence state."""
+        if self.dirty:
+            self.refresh_evidence()
+
+        rt = self.reports.get("red_team")
+        status = redteam_execution_status(rt)
+
+        if status.is_trustworthy:
+            findings = findings_from_redteam_report(rt, symbol=self.symbol)
+        else:
+            # The agent did not complete. Structural review is still possible
+            # from the numbers, and a degraded review beats none — but it is
+            # labelled as degraded all the way to the reader.
+            findings = deterministic_review(self.reports, symbol=self.symbol)
+            if findings:
+                status = ReviewExecutionStatus.COMPLETED_BY_FALLBACK
+                log.warning("red team %s for %s — deterministic fallback review used",
+                            redteam_execution_status(rt).value, self.symbol)
+
+        # Research that was demanded and never arrived is itself an objection.
+        # Without this the loop would treat an unanswered request as answered.
+        if current.get("followup_failed"):
+            findings = list(findings) + [Finding(
+                objection=(f"Corroboration was demanded for {self.symbol} and could "
+                           f"not be obtained: "
+                           f"{current.get('followup_error', 'no agent could answer it')}."),
+                severity=Severity.HIGH,
+                test="The open question is still open. Treat the thesis as unsupported "
+                     "on that point rather than assuming the answer.",
+                category="unresolved_research",
+                targets=[self.symbol],
+            )]
+
+        self.last_status = status
+        self.rounds.append({
+            "round": iteration + 1,
+            "graph_version": self.graph_version,
+            "evidence_nodes": len(self.graph.nodes),
+            "effective_independent": round(self.independent, 3),
+            "execution_status": status.value,
+            "n_findings": len(findings),
+            "objections": [f.objection[:160] for f in findings],
+            "followup_agents": list(self.followup_agents),
+        })
+        return CriticResult(
+            findings=findings,
+            execution_status=status,
+            graph_version=self.graph_version,
+            evidence_nodes=len(self.graph.nodes),
+        )
+
+    def investigate(self, current: dict, questions: list[str]) -> dict:
+        """Run bounded follow-up research, then mark the evidence stale.
+
+        The orchestrator's investigator runs the agents *and* re-runs synthesis
+        and the red team, so by the time this returns both the evidence and the
+        adversary are new. Marking `dirty` makes the next round rebuild.
+        """
+        if self.investigator is None:
+            current["followup_failed"] = True
+            return current
+
+        self.nodes_before_followup = len(self.graph.nodes)
+        before = set(self.reports)
+        updated = self.investigator(self.symbol, current, questions, self.plan)
+
+        gained = sorted(set(self.reports) - before)
+        refreshed = list(updated.get("followup_agents", []))
+        self.followup_agents.extend(refreshed or gained)
+
+        if not refreshed and not gained:
+            # Nothing ran. Say so rather than letting the next round assume
+            # the request was met.
+            updated["followup_failed"] = True
+            self.followup_failures.append("no agent produced new evidence")
+        else:
+            self.dirty = True
+        return updated
+
+
+def _bind_investigator(session: CandidateReview):
+    """Adapt the review session to the loop's `investigator(idea, questions)`."""
     def follow_up(current: dict, questions: list[str]) -> dict:
-        return investigator(symbol, current, questions, plan)
+        return session.investigate(current, questions)
     return follow_up
 
 
@@ -103,6 +252,8 @@ class Pipeline2Result:
     observability: dict = field(default_factory=dict)
     # The authoritative output. Everything downstream reads this.
     publication: PublicationSet = field(default_factory=PublicationSet)
+    # Per-candidate review state: rounds, graph versions, follow-up agents.
+    review_sessions: list = field(default_factory=list)
 
     @property
     def actionable(self) -> list[Recommendation]:
@@ -276,9 +427,13 @@ class Pipeline2:
     ) -> tuple[list[Recommendation], list[RejectedCandidate], list]:
         pb = reports.get("playbook")
         if not pb or not pb.usable:
-            return [], [], []
+            # No candidates at all. That is not a review failure — there was
+            # nothing to review — so `review_incomplete` stays False.
+            return [], [], [], False, []
 
-        rt = reports.get("red_team")
+        # Note: the red-team report is deliberately *not* captured here.
+        # `CandidateReview.critic` re-reads it every round, which is what makes
+        # a post-follow-up round see a fresh adversary instead of a stale one.
         regime = (reports.get("volatility_regime").data.get("regime", "unknown")
                   if reports.get("volatility_regime")
                   and reports["volatility_regime"].usable else "unknown")
@@ -297,33 +452,34 @@ class Pipeline2:
         recommendations: list[Recommendation] = []
         rejected: list[RejectedCandidate] = []
         outcomes: list = []
+        sessions: list[CandidateReview] = []
+        review_incomplete = False
         plan_by_subject = {p.subject: p for p in (plans or [])}
 
         for kind, idea in ideas:
             symbol = idea.get("symbol", "?")
-            sym_nodes = graph.by_subject(symbol) or list(graph.nodes.values())
-            independent = graph.effective_independent_count(sym_nodes)
             candidate_id = idea.get("recommendation_id") or f"cand_{uuid.uuid4().hex[:12]}"
 
             # --- the review gate, applied BEFORE publication ---
-            def critic(current, iteration, _rt=rt, _sym=symbol):
-                return findings_from_redteam_report(_rt, symbol=_sym)
-
-            # A REQUEST_MORE_RESEARCH decision must buy real evidence, not just
-            # leave the questions open. The investigator is bounded by the
-            # plan's budget and is supplied by the orchestrator, which is the
-            # only layer that can actually execute agents.
-            follow_up = (
-                _bind_investigator(investigator, symbol, plan_by_subject.get(symbol))
-                if investigator is not None else None
-            )
+            # The session owns the evidence state across rounds: a follow-up
+            # rebuilds the graph and re-runs the adversary, so round 2 argues
+            # against what round 1 bought rather than against a cached report.
+            session = CandidateReview(
+                self, reports, symbol, graph,
+                plan_by_subject.get(symbol), investigator)
+            session.candidate_id = candidate_id
+            sessions.append(session)
 
             outcome = self.review_loop.run(
                 dict(idea, recommendation_id=candidate_id),
-                critic=critic, investigator=follow_up)
+                critic=session.critic,
+                investigator=_bind_investigator(session) if investigator else None)
             outcomes.append(outcome)
+            independent = session.independent
 
             if outcome.rejected:
+                incomplete = (outcome.final_decision.status
+                              is ReviewStatus.REVIEW_INCOMPLETE)
                 rejected.append(RejectedCandidate(
                     subject=symbol,
                     candidate_id=candidate_id,
@@ -331,10 +487,16 @@ class Pipeline2:
                     findings=list(outcome.final_decision.reasons),
                     audit=outcome.audit_trail(),
                     original_confidence=int(idea.get("confidence", 0)),
+                    status=(RecordStatus.SUPPRESSED if incomplete
+                            else RecordStatus.REJECTED),
+                    review_rounds=list(session.rounds),
                 ))
-                self.obs.event("review", f"{symbol} rejected: "
+                self.obs.event("review", f"{symbol} "
+                                         f"{'suppressed' if incomplete else 'rejected'}: "
                                          f"{outcome.final_decision.summary()}",
-                               level="info")
+                               level="warning" if incomplete else "info")
+                if incomplete:
+                    review_incomplete = True
                 continue
 
             reviewed = outcome.final_idea
@@ -372,9 +534,15 @@ class Pipeline2:
 
             # Lineage, written once so a published call can be traced back.
             rec.candidate_id = candidate_id
-            rec.evidence_graph_id = graph.investigation_id
+            # The graph the *final* round actually saw, not the session's
+            # opening one — after a follow-up these differ, and citing the
+            # wrong version would make the audit trail lie.
+            rec.evidence_graph_id = session.graph.investigation_id
+            rec.graph_version = session.graph_version
             rec.review_decision_id = outcome.final_decision.id
             rec.review_status = outcome.final_decision.status.value
+            rec.review_execution_status = session.last_status.value
+            rec.review_rounds = list(session.rounds)
             rec.source_kind = kind
 
             # Presentation payload only. `publication._payload_from` overwrites
@@ -388,7 +556,7 @@ class Pipeline2:
             }
             recommendations.append(rec)
 
-        return recommendations, rejected, outcomes
+        return recommendations, rejected, outcomes, review_incomplete, sessions
 
     # ------------------------------------------------------------------
     # 4. the whole thing
@@ -421,9 +589,10 @@ class Pipeline2:
         graph = self.build_graph(reports)
         contradictions = self.chief.detect_contradictions(reports)
 
-        recs, rejected, outcomes = self.build_recommendations(
-            reports, graph, degradation, calibration_gap, prior_failures,
-            investigator=investigator, plans=plans)
+        recs, rejected, outcomes, review_incomplete, sessions = \
+            self.build_recommendations(
+                reports, graph, degradation, calibration_gap, prior_failures,
+                investigator=investigator, plans=plans)
 
         # A critically degraded run must not publish the output class whose
         # evidence is missing. This is the "do not silently proceed" rule.
@@ -436,12 +605,29 @@ class Pipeline2:
                     r.conviction = Conviction.INSUFFICIENT_EVIDENCE
                     r.uncertainty_notes.append(degradation.missing_evidence_statement())
 
-        publication = PublicationSet(
-            approved=recs,
-            rejected=rejected,
-            mode=mode,
-            review_iterations=sum(o.iterations_used for o in outcomes),
-        )
+        # An active reviewed recommendation requires a successful adversarial
+        # review. If the reviewer did not complete — and the deterministic
+        # fallback could not stand in — nothing is published, and the reason
+        # says so specifically rather than being laundered into "market
+        # uncertainty". Infrastructure failure and genuine ignorance are
+        # different states and the reader is entitled to know which one.
+        if review_incomplete:
+            statuses = {s.last_status.value for s in sessions
+                        if not s.last_status.is_trustworthy}
+            publication = PublicationSet.suppressed_set(
+                "adversarial review did not complete "
+                f"({', '.join(sorted(statuses)) or 'unknown'}) — an unreviewed "
+                "recommendation is not publishable",
+                mode=mode, rejected=rejected)
+            self.obs.event("review", "publication suppressed: review incomplete",
+                           level="error")
+        else:
+            publication = PublicationSet(
+                approved=recs,
+                rejected=rejected,
+                mode=mode,
+                review_iterations=sum(o.iterations_used for o in outcomes),
+            )
         # Cheap, and it is the invariant the whole release exists to protect.
         publication.assert_no_leak()
 
@@ -456,4 +642,5 @@ class Pipeline2:
             contradictions=contradictions,
             observability=self.obs.status_snapshot(),
             publication=publication,
+            review_sessions=sessions,
         )
