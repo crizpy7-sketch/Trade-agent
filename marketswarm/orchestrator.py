@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import clock
+from .__init__ import __version__
 from .agents import ALL_AGENTS, AgentReport, SwarmContext
 from .config import Config
 from .memory import LearningEngine, MemoryStore, Prediction
@@ -646,7 +647,8 @@ class Swarm:
                      "REJECTED_BY_REVIEW", 0, rej.original_confidence,
                      rej.status.value, rej.candidate_id, rej.reason,
                      json.dumps(rej.audit)[:200000],
-                     result.trace.orchestration_mode, "2.0.1"))
+                     result.trace.orchestration_mode,
+                     __version__))
             conn.commit()
         except sqlite3.Error as exc:
             log.error("failed to persist recommendations: %s", exc)

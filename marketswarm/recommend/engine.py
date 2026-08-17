@@ -171,7 +171,7 @@ class EnginePolicy:
 
 class RecommendationEngine:
     def __init__(self, policy: EnginePolicy | None = None,
-                 system_version: str = "2.0.0"):
+                 system_version: str = "2.0.1"):
         self.policy = policy or EnginePolicy()
         self.system_version = system_version
 

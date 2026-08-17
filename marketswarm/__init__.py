@@ -3,4 +3,4 @@
 Research/educational tooling. Nothing this package emits is financial advice.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
