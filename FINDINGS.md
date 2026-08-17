@@ -182,3 +182,63 @@ means lying to yourself.
 *Research and educational analysis. Not financial advice. Past performance —
 including backtested performance, which is worth considerably less — does not
 indicate future results.*
+
+---
+
+# MarketSwarm 2.0 — backtest comparison
+
+Same data, same universe, same folds, same seeds. Only the decision layer
+differs. Nothing was cherry-picked and nothing below shows an edge.
+
+## Measured results
+
+| | 1.1.2 as documented | after the 2.0 bug fixes | 2.0 decision layer |
+|---|---|---|---|
+| Candidates | 36,581 | 19,075 | 19,075 |
+| Trades taken | 1,519 | 1,354 | 1,354 |
+| Net mean R | −0.0712 | −0.0223 | −0.0223 |
+| Hit rate | 43.4% | 49.0% | 50.8% |
+| Annualised Sharpe | −1.15 | −0.43 | −0.43 |
+| Max drawdown | −38.4R | −69.7R | −60.2R |
+| Brier skill | −0.0070 | +0.0025 | +0.0025 |
+| Deflated Sharpe | 0.131 | 0.004 | 0.004 |
+
+## What actually changed, and what did not
+
+**The improvement from −0.0712R to −0.0223R is a bug fix, not the new
+architecture.** The 1.1.2 measurement was taken while `stop_atr` never reached
+the bracket builder, so the sweep was reporting on configurations it had not
+tested. Wiring that parameter through changed the bracket geometry and the
+measured baseline. It is a more honest number, not a better system.
+
+**The 2.0 decision layer filtered nothing on this dataset — 100% of candidates
+passed every gate.** That is a real and important negative result, and the
+reason is instructive: the 2.0 gates operate on *evidence quality*, and a
+daily-bar backtest contains no evidence to vary. There are no headlines, no
+filings, no option chains and no corroboration counts in the 2013–2018 OHLCV
+set, so every candidate presents the engine with the same three thin clusters
+(technical, volatility, market beta) and receives the same verdict.
+
+The gates that would discriminate — `INSUFFICIENT_EVIDENCE` when independent
+evidence is thin, `CONFLICTING_EVIDENCE` when sources disagree,
+red-team rejection on a live objection — are inert when every input is
+identical. **The 2.0 architecture cannot be validated on this data.** Claiming
+otherwise from these numbers would be exactly the self-deception the validation
+layer exists to prevent.
+
+## Honest conclusion
+
+- **No edge is demonstrated, before or after.** Deflated Sharpe 0.004 against a
+  12-trial hurdle. The system does not beat random selection on this data.
+- The 2.0 work is an **architecture and correctness upgrade**: the red team can
+  now change output, evidence is traceable, correlated signals are discounted,
+  the system can say "I don't know", and four real bugs are fixed.
+- **Whether it forecasts better is unmeasured**, and honestly cannot be
+  measured until the evidence layer has data to work on. That needs intraday
+  bars, real option flow and timestamped news — the Tier 1 items in the
+  recommendations, none of which the free daily dataset provides.
+
+Validating 2.0 properly requires forward paper-trading with the live evidence
+pipeline, scored through `marketswarm score` and judged by
+`marketswarm calibration`. Expect that to take months, and expect the honest
+answer to remain "no demonstrated edge" until the data says otherwise.

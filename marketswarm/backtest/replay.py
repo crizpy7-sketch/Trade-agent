@@ -26,7 +26,7 @@ from ..stats import distributions as dist
 from ..stats import edge as edgemod
 from ..stats.calibration import PlattCalibrator, brier_decomposition
 from .datastore import PointInTimeStore
-from .features import FEATURE_NAMES, build_features, resolve_outcome
+from .features import FEATURE_NAMES, resolve_outcome
 from .fills import FillModel, LIQUID_PRESET, STANDARD_PRESET
 from .validation import purged_walk_forward_splits, summarize_returns
 

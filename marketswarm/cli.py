@@ -32,6 +32,13 @@ log = logging.getLogger("marketswarm")
 
 
 def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
+    """Delegates to observability.configure_logging, which attaches the
+    secret-redaction filter to every handler."""
+    from .observability import configure_logging
+    configure_logging(verbose, log_file)
+
+
+def _legacy_setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -425,8 +432,6 @@ def cmd_backtest(args, cfg: Config) -> int:
     import json as _json
     import pickle
 
-    import numpy as np
-
     from .backtest.datastore import PointInTimeStore
     from .backtest.features import build_dataset
     from .backtest.replay import BacktestEngine
@@ -543,6 +548,189 @@ async def cmd_monitor(args, cfg: Config) -> int:
     return 0
 
 
+
+# --------------------------------------------------------------------------
+# 2.0 commands
+# --------------------------------------------------------------------------
+
+def cmd_migrate(args, cfg: Config) -> int:
+    from .memory.migrations import LATEST_VERSION, applied, current_version, migrate
+    store = MemoryStore(cfg.db_path)
+    before = current_version(store.conn)
+    print(f"Database  {cfg.db_path}")
+    print(f"Schema    v{before} → target v{LATEST_VERSION}")
+    if args.check:
+        for m in applied(store.conn):
+            print(f"  applied v{m['version']:03d} {m['name']} at {m['applied_at']}")
+        print("pending: " + (", ".join(
+            m.name for m in __import__("marketswarm.memory.migrations",
+                                       fromlist=["MIGRATIONS"]).MIGRATIONS
+            if m.version > before) or "none"))
+        store.close()
+        return 0
+    done = migrate(store.conn)
+    print(f"Applied {len(done)} migration(s): {', '.join(done) or 'none'}")
+    print("Existing 1.x data is preserved — migrations are additive.")
+    store.close()
+    return 0
+
+
+def cmd_investigate(args, cfg: Config) -> int:
+    """Show what the Event Brain and Chief Investigator would do right now."""
+    import json as _json
+    from .investigation.chief import ChiefInvestigator
+    from .investigation.event_brain import EventBrain
+
+    if args.snapshot:
+        snapshot = _json.loads(Path(args.snapshot).expanduser().read_text())
+    else:
+        print("No --snapshot supplied; running the swarm to build one…\n")
+        swarm = Swarm(cfg)
+        result = asyncio.run(swarm.run(force=args.force))
+        if not result.market_open:
+            print("Market closed — nothing to investigate.")
+            return 0
+        from .pipeline2 import Pipeline2
+        snapshot = Pipeline2(cfg).build_snapshot(result.reports)
+        swarm.store.close()
+
+    triage = EventBrain().triage(snapshot)
+    print(f"═══ EVENT BRAIN ═══  {triage['n_events']} events, "
+          f"highest {triage['highest'].value}\n")
+    for e in triage["events"][:20]:
+        print(f"  [{e.priority.value:8}] {e.subject:8} {e.event_type.value:20} "
+              f"{e.description[:80]}")
+    if triage["quiet"]:
+        print(f"\n  quiet: {', '.join(triage['quiet'][:15])}")
+
+    print("\n═══ INVESTIGATION PLANS ═══\n")
+    for plan in ChiefInvestigator().plan_session(snapshot):
+        print(plan.describe())
+        print()
+    return 0
+
+
+def cmd_review(args, cfg: Config) -> int:
+    """Inspect the audit trail for a recommendation."""
+    from .api import ReadOnlyAPI
+    store = MemoryStore(cfg.db_path)
+    api = ReadOnlyAPI(store.conn)
+    audit = api.recommendation_audit(args.recommendation_id)
+    if not audit:
+        print(f"No recommendation {args.recommendation_id}")
+        store.close()
+        return 1
+    import json as _json
+    print(_json.dumps(audit, indent=2, default=str))
+    store.close()
+    return 0
+
+
+def cmd_memory(args, cfg: Config) -> int:
+    from .memory.institutional import InstitutionalMemory, MemoryCategory
+    store = MemoryStore(cfg.db_path)
+    mem = InstitutionalMemory(store.conn)
+
+    if args.prune:
+        print(f"Pruned: {mem.prune()}")
+        store.close()
+        return 0
+
+    stats = mem.stats()
+    print(f"\nActive memories  {stats['active_memories']}")
+    for cat, n in (stats.get("by_category") or {}).items():
+        print(f"  {cat:12} {n}")
+    print(f"\nMistakes recorded {stats['mistakes']}")
+    for tax, n in (stats.get("mistake_frequency") or {}).items():
+        print(f"  {tax:40} {n}")
+
+    category = MemoryCategory(args.category) if args.category else None
+    entries = mem.recall(category, subject=args.subject, limit=args.limit)
+    if entries:
+        print(f"\nRecalled {len(entries)}:")
+        for m in entries:
+            print(f"  [{m.category.value}] {m.title}")
+            print(f"      {m.body[:110]}")
+            print(f"      confidence {m.confidence:.2f}, n={m.evidence_n}")
+    store.close()
+    return 0
+
+
+def cmd_experiments(args, cfg: Config) -> int:
+    from .experiments.lab import ExperimentLab
+    from .experiments.scientist import ResearchScientist
+    store = MemoryStore(cfg.db_path)
+    lab = ExperimentLab(store.conn)
+    lab.set_initial_champion()
+
+    if args.propose:
+        sci = ResearchScientist(store.conn)
+        print(sci.report())
+        proposals = sci.propose()
+        if proposals and args.register:
+            ids = sci.register_proposals(lab, proposals)
+            print(f"\nRegistered {len(ids)} challenger(s). They are INERT until they "
+                  f"pass the promotion gates and a human approves them.")
+        store.close()
+        return 0
+
+    stats = lab.stats()
+    print(f"\nChampion         {stats['champion']}")
+    print(f"Human approval   {'required' if stats['require_human_approval'] else 'NOT required'}")
+    print(f"Experiments      {stats['by_status']}")
+    for e in lab.list_experiments(limit=args.limit):
+        print(f"  [{e['status']:9}] {e['role']:10} {e['name']}")
+        print(f"      {e['hypothesis'][:100]}")
+    store.close()
+    return 0
+
+
+def cmd_dashboard(args, cfg: Config) -> int:
+    import json as _json
+    from .api import ReadOnlyAPI
+    store = MemoryStore(cfg.db_path)
+    data = ReadOnlyAPI(store.conn).dashboard()
+    if args.json:
+        print(_json.dumps(data, indent=2, default=str))
+        store.close()
+        return 0
+
+    sysinfo = data["system"]
+    print(f"\n═══ MARKETSWARM ═══")
+    print(f"  {sysinfo['market_status']}")
+    print(f"  session {sysinfo['session']}, schema v{sysinfo['schema_version']}")
+    if sysinfo["open_circuits"]:
+        print(f"  ⚠ open circuits: {', '.join(sysinfo['open_circuits'])}")
+
+    perf = data["performance"]
+    if perf.get("n"):
+        print(f"\n  Track record   {perf['n']} resolved, hit {perf['hit_rate']:.0%}, "
+              f"expectancy {perf['expectancy_r']:+.3f}R")
+        print(f"  Calibration    forecast {perf['mean_forecast']:.0%} vs "
+              f"actual {perf['hit_rate']:.0%} (gap {perf['calibration_gap']:+.1%})")
+    else:
+        print("\n  Track record   none yet")
+
+    if data["agents"]:
+        print("\n  Agents (last run)")
+        for a in data["agents"][:8]:
+            flag = " ✗" if a["status"] == "FAILED" else ""
+            print(f"    {a['agent']:18} {a['status']:9} {a['latency_ms']:>6}ms{flag}")
+
+    if data["failures"]:
+        print("\n  Failure taxonomy")
+        for tax, n in list(data["failures"].items())[:5]:
+            print(f"    {tax:40} {n}")
+
+    mem = data["memory"]
+    print(f"\n  Memory         {mem['active_memories']} active, "
+          f"{mem['mistakes']} mistakes")
+    print(f"  Cost (7d)      ${data['costs']['total_usd']:.4f}")
+    print()
+    store.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="marketswarm",
@@ -600,6 +788,32 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--interval", type=int, default=300)
     m.add_argument("--once", action="store_true")
 
+
+    mg = sub.add_parser("migrate", help="apply 2.0 database migrations")
+    mg.add_argument("--check", action="store_true", help="show status without applying")
+
+    iv = sub.add_parser("investigate", help="show what the Event Brain and Chief would do")
+    iv.add_argument("--snapshot", help="JSON snapshot file instead of a live run")
+    iv.add_argument("--force", action="store_true")
+
+    rv = sub.add_parser("review", help="audit trail for one recommendation")
+    rv.add_argument("recommendation_id")
+
+    mm = sub.add_parser("memory", help="inspect institutional memory")
+    mm.add_argument("--category", choices=["episodic", "semantic", "company", "agent",
+                                           "strategy", "failure", "experiment"])
+    mm.add_argument("--subject")
+    mm.add_argument("--limit", type=int, default=10)
+    mm.add_argument("--prune", action="store_true")
+
+    ex = sub.add_parser("experiments", help="champion/challenger lab")
+    ex.add_argument("--propose", action="store_true", help="run the research scientist")
+    ex.add_argument("--register", action="store_true", help="file proposals as challengers")
+    ex.add_argument("--limit", type=int, default=10)
+
+    db = sub.add_parser("dashboard", help="operator overview")
+    db.add_argument("--json", action="store_true")
+
     h = sub.add_parser("holidays", help="list market closures")
     h.add_argument("year", nargs="?", type=int)
 
@@ -621,6 +835,18 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             log.info("daemon stopped")
             return 0
+    if args.command == "migrate":
+        return cmd_migrate(args, cfg)
+    if args.command == "investigate":
+        return cmd_investigate(args, cfg)
+    if args.command == "review":
+        return cmd_review(args, cfg)
+    if args.command == "memory":
+        return cmd_memory(args, cfg)
+    if args.command == "experiments":
+        return cmd_experiments(args, cfg)
+    if args.command == "dashboard":
+        return cmd_dashboard(args, cfg)
     if args.command == "fetch":
         return cmd_fetch(args, cfg)
     if args.command == "backtest":

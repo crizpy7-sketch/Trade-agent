@@ -10,7 +10,6 @@ narrative confidence.
 from __future__ import annotations
 
 import math
-import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -127,10 +126,8 @@ class RiskAgent(BaseAgent):
     async def run(self, ctx: SwarmContext) -> AgentReport:
         rep = AgentReport(agent=self.name, headline="Risk assessment")
 
-        p = ctx.data_of("cross_verify", "probability", 0.5)
         conf = ctx.data_of("cross_verify", "confidence_score", 40)
         regime = ctx.data_of("volatility_regime", "regime", "unknown")
-        event_risk = ctx.data_of("econ_calendar", "event_risk", "low")
         very_high = ctx.data_of("econ_calendar", "very_high_impact", []) or []
         vix = ctx.data_of("volatility_regime", "vix")
         flows = ctx.data_of("options_flow", "flows", {}) or {}

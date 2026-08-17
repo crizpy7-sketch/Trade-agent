@@ -1,12 +1,37 @@
-# MarketSwarm
+# MarketSwarm 2.0
 
-An autonomous pre-market research agent. It wakes before the U.S. open, gathers
-evidence from a dozen independent sources, fuses it with Bayesian statistics
-into a calibrated probability, builds concrete bracketed trade ideas whose odds
-come from a path simulation rather than from a narrative, writes a report — and
-then, after the close, scores itself and updates its own weights.
+An adaptive, evidence-driven market-research agent. It notices what matters,
+investigates it with the right specialists, builds a traceable evidence graph,
+attacks its own conclusions, revises them, publishes — then scores itself,
+remembers its mistakes, and proposes experiments to fix them.
 
-**Research and educational software. Nothing it produces is financial advice.**
+**Research and decision-support software only. It has no brokerage integration,
+no order path and no access to funds. Nothing it produces is financial advice.**
+
+> **No demonstrated edge.** Five years of purged walk-forward validation on real
+> data show −0.02R per trade net of costs and a deflated Sharpe of 0.004. See
+> [`FINDINGS.md`](FINDINGS.md). The 2.0 work is an architecture and correctness
+> upgrade; whether it forecasts better is unmeasured and honestly cannot be
+> measured until the evidence layer has real data to work on.
+
+## What changed in 2.0
+
+| | 1.1.2 | 2.0 |
+|---|---|---|
+| Red team | ran last, changed nothing | **Review Gate** — can lower confidence, modify, demand research, or reject |
+| Orchestration | all 16 agents, every session | **Event Brain + Chief Investigator** — effort follows the events |
+| Evidence | flat list | **Evidence Graph** — provenance, contradictions, 6 score dimensions |
+| Correlation | one global constant (0.35) | **cluster-aware** — 20 beta reads collapse to <2.5 |
+| Learning | "was the agent right?" | **contribution** — did the forecast improve? — per context |
+| Memory | one lessons table | **7 categories + mistake taxonomy**, with staleness and versioning |
+| Vocabulary | long or short | adds `NO_EDGE`, `INSUFFICIENT_EVIDENCE`, `CONFLICTING_EVIDENCE` |
+| Experiments | edit production | **champion/challenger** with promotion gates and human approval |
+| Failure | contained per agent | **circuit breakers + degradation levels**; missing evidence is stated |
+| Observability | print statements | traces, costs, structured logs, read-only API |
+
+Full detail in [`docs/`](docs/) — start with
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/MIGRATION_1_TO_2.md`](docs/MIGRATION_1_TO_2.md).
 
 ---
 
@@ -183,6 +208,14 @@ marketswarm daemon               # scheduler (what systemd runs)
 marketswarm fetch --source github_sp500   # download historical data
 marketswarm backtest --n-trials 12        # purged walk-forward validation
 marketswarm monitor                       # intraday invalidation watch
+
+# 2.0
+marketswarm migrate [--check]             # schema migrations (additive, safe)
+marketswarm dashboard [--json]            # operator overview
+marketswarm investigate                   # what the Event Brain and Chief would do
+marketswarm review <recommendation_id>    # full audit trail
+marketswarm memory [--prune]              # institutional memory
+marketswarm experiments --propose         # research scientist (propose only)
 ```
 
 The daemon runs the research pass at `MARKETSWARM_RUN_TIME` ET on trading days
@@ -260,11 +293,13 @@ pip install pytest pytest-asyncio
 pytest -q
 ```
 
-101 tests cover the market calendar (including observed-holiday and Good
+239 tests cover the market calendar (including observed-holiday and Good
 Friday rules), every statistical routine, config handling, a full end-to-end
 swarm run against synthetic providers, and the backtest machinery — including
-negative tests that the store *refuses* lookahead, that purged folds do not
-leak, and that ambiguous bars resolve pessimistically.
+negative tests that assert impossibility: the store *refuses* lookahead, a
+CRITICAL red-team finding can never be approved under any policy, the research
+scientist has no promote method, a challenger cannot mutate the champion, and
+no `subprocess`/`eval`/`exec` exists anywhere in the package.
 
 ## Licence
 

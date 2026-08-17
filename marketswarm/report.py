@@ -7,7 +7,6 @@ every idea section carries it.
 
 from __future__ import annotations
 
-import datetime as dt
 import html
 from pathlib import Path
 
@@ -214,8 +213,8 @@ def _render_idea_block(title: str, ideas: list[dict], kind: str, demo: bool = Fa
         out.append(f"### {n}. {tag}{i['symbol']} {i.get('strike', '')} {kind.upper()} "
                    f"{'exp ' + i['expiration'] if i.get('expiration') else ''}")
         out.append("")
-        out.append(f"| | |")
-        out.append(f"|---|---|")
+        out.append("| | |")
+        out.append("|---|---|")
         out.append(f"| Underlying | {i['symbol']} at {i['entry']:.2f} |")
         if i.get("strike"):
             out.append(f"| Strike / expiration | {i['strike']:g} {kind} · {i.get('expiration', 'nearest weekly')} |")
@@ -328,7 +327,7 @@ def render_html(result: SwarmResult, narrative: str | None = None, demo: bool = 
     """Minimal Markdown→HTML conversion, dependency-free."""
     md = render_markdown(result, narrative, demo)
     body: list[str] = []
-    in_table = in_list = in_details = False
+    in_table = in_list = False
 
     for line in md.split("\n"):
         stripped = line.strip()
@@ -337,7 +336,6 @@ def render_html(result: SwarmResult, narrative: str | None = None, demo: bool = 
             if in_list:
                 body.append("</ul>"); in_list = False
             body.append(stripped)
-            in_details = stripped.startswith("<details")
             continue
 
         if stripped.startswith("|"):

@@ -12,7 +12,7 @@ import datetime as dt
 import json
 import logging
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 

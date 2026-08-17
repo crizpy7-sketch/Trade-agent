@@ -15,8 +15,6 @@ The mechanical layer runs with no API key and is the part that has teeth.
 
 from __future__ import annotations
 
-import numpy as np
-
 from .base import AgentReport, BaseAgent, SwarmContext
 
 
@@ -87,7 +85,6 @@ class RedTeamAgent(BaseAgent):
                 })
 
         # --- 4. thin evidence dressed as conviction ---
-        conf = ctx.data_of("cross_verify", "confidence_score", 0)
         eff_n = ctx.data_of("cross_verify", "effective_n", 0)
         raw_n = ctx.data_of("cross_verify", "raw_signal_count", 0)
         if raw_n and eff_n < 2.5:

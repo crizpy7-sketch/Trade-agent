@@ -45,6 +45,7 @@ class SwarmResult:
     started_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
     finished_at: dt.datetime | None = None
     narrative: str | None = None
+    v2: object | None = None          # Pipeline2Result when the 2.0 layers ran
 
     @property
     def duration_seconds(self) -> float:
@@ -88,6 +89,16 @@ class Swarm:
         self.config = config
         self.store = store or MemoryStore(config.db_path)
         self.learning = LearningEngine(self.store)
+
+        # 2.0 schema. Additive and idempotent — 1.x data is preserved.
+        try:
+            from .memory.migrations import migrate
+            applied = migrate(self.store.conn)
+            if applied:
+                log.info("applied %d schema migration(s): %s", len(applied),
+                         ", ".join(applied))
+        except Exception as exc:  # noqa: BLE001 — never block a run on migrations
+            log.error("schema migration failed, continuing on the existing schema: %s", exc)
 
     async def run(self, run_date: dt.date | None = None, force: bool = False) -> SwarmResult:
         run_date = run_date or clock.now_et().date()
@@ -143,6 +154,23 @@ class Swarm:
                     log.info("  %s: %s (%s, %dms)", r.agent, r.headline, r.status, r.duration_ms)
 
             result.reports = ctx.reports
+
+        # ---- MarketSwarm 2.0 layers ----
+        # Runs on top of the completed swarm. Any failure here degrades to the
+        # 1.x behaviour rather than losing the run.
+        try:
+            from .pipeline2 import Pipeline2
+            gap = None
+            perf = self.store.performance_summary(90)
+            for b in (perf.get("by_kind") or {}).values():
+                gap = b.get("calibration_gap")
+                break
+            pipeline = Pipeline2(self.config, store=self.store)
+            result.v2 = pipeline.run(ctx.reports, run_date, calibration_gap=gap)
+            log.info("2.0 pipeline: %s", result.v2.summary())
+        except Exception:  # noqa: BLE001
+            log.exception("2.0 pipeline failed; falling back to the 1.x output")
+            result.v2 = None
 
         cv = ctx.reports.get("cross_verify")
         if cv and cv.usable:
@@ -252,7 +280,7 @@ def _gap_bucket(gap: float | None) -> str:
     a = abs(gap)
     side = "up" if gap > 0 else "down"
     if a < 0.5:
-        return f"flat"
+        return "flat"
     if a < 1.5:
         return f"small_{side}"
     if a < 3.0:
