@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -7,12 +8,34 @@ dist/
 .venv/
 venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+coverage/
 htmlcov/
 
-# Runtime state — never commit the agent's memory or its reports
+# Secrets and credentials
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime state — never commit the agent's memory, databases, or reports
 *.db
+*.sqlite
 *.sqlite3
 reports/
 .marketswarm/
+logs/
+*.log
+
+# Temporary / OS / editor artifacts
+tmp/
+temp/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

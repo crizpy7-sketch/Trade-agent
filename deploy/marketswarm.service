@@ -1,6 +1,6 @@
 [Unit]
 Description=MarketSwarm pre-market intelligence agent
-Documentation=https://github.com/crizpy7-sketch/trade-agent
+Documentation=https://github.com/crizpy7-sketch/marketswarm
 After=network-online.target
 Wants=network-online.target
 

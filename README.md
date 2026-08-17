@@ -165,8 +165,8 @@ so the learning loop sees the same outcome you did. It never places an order.
 ### systemd (recommended)
 
 ```bash
-git clone https://github.com/crizpy7-sketch/trade-agent.git
-cd trade-agent
+git clone https://github.com/crizpy7-sketch/marketswarm.git
+cd marketswarm
 sudo ./deploy/install.sh
 sudo nano /etc/marketswarm/env        # set MARKETSWARM_CONTACT at minimum
 sudo systemctl start marketswarm
