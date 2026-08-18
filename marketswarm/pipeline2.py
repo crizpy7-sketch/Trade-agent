@@ -111,7 +111,11 @@ class CandidateReview:
         hundred node constructions on a session that asked for more research —
         which is not the hot path.
         """
-        self.graph = self.pipeline.build_graph(self.reports)
+        # The investigation id is carried across the rebuild. Without it the
+        # refreshed graph starts anonymous, and every node written from round 2
+        # onward loses the thread back to the investigation that produced it.
+        self.graph = self.pipeline.build_graph(
+            self.reports, self.graph.investigation_id)
         self.graph_version += 1
         self.independent = self._independence()
         self.nodes_after_followup = len(self.graph.nodes)
@@ -510,7 +514,7 @@ class Pipeline2:
                 target=reviewed.get("target"),
                 stop=reviewed.get("stop"),
                 effective_independent_evidence=independent,
-                n_contradictions=len(graph.contradictions()),
+                n_contradictions=len(session.graph.contradictions()),
                 regime=regime,
                 event_pending=event_pending,
                 data_quality=degradation.data_quality(),
@@ -523,11 +527,16 @@ class Pipeline2:
                 liquidity_score=float(reviewed.get("liquidity", 0.5)),
             )
 
+            # `session.graph`, not the outer `graph`. The session rebuilt the
+            # evidence when a review round asked for follow-up, and publishing
+            # from the outer graph would hand the engine round 1's evidence to
+            # justify a recommendation that round 2 actually approved — the
+            # exact split state the review loop exists to prevent.
             rec = self.engine.build(
-                inp, graph=graph,
+                inp, graph=session.graph,
                 open_questions=reviewed.get("open_questions", []),
                 agent_contributors=contributions,
-                investigation_id=graph.investigation_id,
+                investigation_id=session.graph.investigation_id,
             )
             rec.original_confidence = int(idea.get("confidence", rec.confidence))
             rec.revision_count = max(0, outcome.iterations_used - 1)
@@ -593,6 +602,19 @@ class Pipeline2:
             self.build_recommendations(
                 reports, graph, degradation, calibration_gap, prior_failures,
                 investigator=investigator, plans=plans)
+
+        # If any candidate's review pulled in follow-up research, `reports` moved
+        # underneath the run-level graph and this copy is now round-1 evidence.
+        # The report and the database both read it, so leaving it stale is how a
+        # run ends up publishing v2 recommendations above a v1 evidence section.
+        # `build_graph` is a pure function of the reports, so rebuilding here
+        # gives every reader the same evidence the recommendations were built on.
+        refreshed = max((s.graph_version for s in sessions), default=1)
+        if refreshed > 1:
+            graph = self.build_graph(reports, graph.investigation_id)
+            contradictions = self.chief.detect_contradictions(reports)
+            self.obs.event("evidence", f"run graph rebuilt to v{refreshed} "
+                                       f"after follow-up research")
 
         # A critically degraded run must not publish the output class whose
         # evidence is missing. This is the "do not silently proceed" rule.

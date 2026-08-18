@@ -23,6 +23,8 @@ import pytest
 
 import marketswarm.orchestrator as orch
 from marketswarm.agents import ALL_AGENTS
+from marketswarm.pipeline2 import CandidateReview
+from marketswarm.recommend.engine import RecommendationEngine
 from marketswarm.review.gate import (ReviewDecision, ReviewExecutionStatus,
                                      ReviewGate, ReviewStatus, Severity)
 
@@ -884,3 +886,109 @@ def test_closed_loop_reads_the_round_history(swarm_factory, monkeypatch):
         "the closed loop could not recover the round history it needs to say "
         "whether the research was worth it")
     assert recovered[0]["round"] < recovered[-1]["round"]
+
+
+# ==========================================================================
+# TEST N — the published recommendation is built on the evidence that
+#          approved it, not on the evidence round 1 argued about
+# ==========================================================================
+
+def test_publication_is_built_from_the_refreshed_graph(swarm_factory, monkeypatch):
+    """The state-coherence invariant, asserted where it was actually broken.
+
+    Before this, `build_recommendations` recorded `session.graph_version` onto
+    the recommendation while passing the *outer* graph to the engine. So a
+    candidate could be stamped v2, stored as v2, and reported as v2, while the
+    evidence the engine actually reasoned over was v1 — the split state the
+    review loop exists to prevent, and invisible from the outside precisely
+    because the label was right.
+    """
+    from marketswarm.agents.base import AgentReport
+    from marketswarm.agents.redteam import RedTeamAgent
+
+    # Round 1 demands follow-up (so the graph refreshes), then the red team
+    # finds nothing (so something actually reaches the engine). Both halves are
+    # needed: a run where everything is rejected never calls build at all.
+    async def clean(self, ctx):
+        rep = AgentReport(agent="red_team", headline="Red team: no objection")
+        rep.data = {"objections": [], "high_severity": 0,
+                    "recommend_stand_down": False}
+        rep.confidence = 0.7
+        return rep
+
+    demand_research_once(monkeypatch)
+    monkeypatch.setattr(RedTeamAgent, "run", clean)
+    swarm = swarm_factory(gaps=EVENTFUL)
+
+    seen: list[int] = []
+    original_build = RecommendationEngine.build
+
+    def spy(self, inputs, graph=None, **kw):
+        # Node count identifies which graph object the engine was handed.
+        seen.append(len(graph.nodes) if graph is not None else -1)
+        return original_build(self, inputs, graph=graph, **kw)
+
+    monkeypatch.setattr(RecommendationEngine, "build", spy)
+    result = run(swarm)
+
+    sessions = result.v2.review_sessions
+    grew = [s for s in sessions if s.graph_version > 1]
+    if not grew:
+        pytest.skip("no session refreshed its graph in this run")
+
+    assert seen, "the recommendation engine was never called"
+
+    # Every build saw at least as much evidence as existed after the refresh.
+    smallest_refreshed = min(s.nodes_after_followup for s in grew)
+    stale = min(s.nodes_before_followup for s in grew)
+    for nodes in seen:
+        assert nodes >= smallest_refreshed, (
+            f"engine built from a {nodes}-node graph; the refreshed evidence "
+            f"had {smallest_refreshed} nodes (pre-refresh was {stale}) — the "
+            f"recommendation was justified with evidence the review replaced")
+
+
+def test_a_refreshed_graph_keeps_its_investigation_id(swarm_factory):
+    """`refresh_evidence` rebuilds the graph; rebuilding must not reset identity.
+
+    Asserted directly rather than through a run, because nothing in the pipeline
+    currently assigns an investigation id at all — `build_graph` takes one and
+    every caller passes None, so a run-level assertion would only be testing
+    that None survives. This pins the behaviour that matters when the
+    investigation layer is wired up: whatever identity the graph had going into
+    a refresh is the identity it has coming out.
+    """
+    from marketswarm.pipeline2 import Pipeline2
+
+    swarm = swarm_factory(gaps=QUIET)
+    pipeline = Pipeline2(swarm.config, store=swarm.store)
+    graph = pipeline.build_graph({}, "inv_abc123")
+    assert graph.investigation_id == "inv_abc123"
+
+    session = CandidateReview(pipeline, {}, "SPY", graph, None, None)
+    before = session.graph.investigation_id
+    session.refresh_evidence()
+
+    assert session.graph is not graph, "refresh did not actually rebuild"
+    assert session.graph_version == 2
+    assert session.graph.investigation_id == before == "inv_abc123", (
+        "the rebuild dropped the investigation id — every node written after "
+        "the refresh would be orphaned from its investigation")
+
+
+def test_the_reported_graph_matches_what_was_published(swarm_factory, monkeypatch):
+    """The report and the recommendations must not disagree about the evidence."""
+    demand_research_once(monkeypatch)
+    swarm = swarm_factory(gaps=QUIET)
+    result = run(swarm)
+
+    grew = [s for s in result.v2.review_sessions if s.graph_version > 1]
+    if not grew:
+        pytest.skip("no session refreshed its graph in this run")
+
+    run_nodes = len(result.v2.graph.nodes)
+    largest = max(s.nodes_after_followup for s in grew)
+    assert run_nodes >= largest, (
+        f"the run-level graph carries {run_nodes} nodes but a session ended "
+        f"with {largest} — the report would show evidence the published "
+        f"recommendations were not built on")
