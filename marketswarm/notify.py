@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
 import urllib.request
+
+from . import __version__
 
 log = logging.getLogger("marketswarm.notify")
 
 MAX_LEN = 1800
+
+# Discord's edge rejects urllib's default `Python-urllib/x.y` User-Agent with a
+# bare 403 before the payload is ever looked at — which is why a webhook that
+# answers curl can still refuse this client. Identifying ourselves is the fix.
+# Slack and Telegram accept the same header, so it is set unconditionally.
+USER_AGENT = f"MarketSwarm/{__version__} (+https://github.com/crizpy7-sketch/marketswarm)"
 
 
 def summarize(result) -> str:
@@ -51,7 +60,10 @@ def send_webhook(url: str, text: str, timeout: float = 15.0) -> bool:
     keys are sent so one endpoint config works for either."""
     payload = json.dumps({"content": text, "text": text}).encode()
     req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -59,6 +71,16 @@ def send_webhook(url: str, text: str, timeout: float = 15.0) -> bool:
             if not ok:
                 log.warning("webhook returned %s", resp.status)
             return ok
+    except urllib.error.HTTPError as exc:
+        # The status alone does not say why. Discord and Slack both explain the
+        # refusal in the response body, and without it a 403 is unactionable.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace").strip()[:300]
+        except Exception:  # noqa: BLE001 — the body is a nicety, never required
+            pass
+        log.warning("webhook delivery failed: %s%s", exc, f" — {detail}" if detail else "")
+        return False
     except Exception as exc:  # noqa: BLE001 — delivery failure must not fail the run
         log.warning("webhook delivery failed: %s", exc)
         return False
