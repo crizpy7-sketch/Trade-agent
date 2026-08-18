@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass, field
 
 from ..stats.distributions import bs_price_and_greeks, implied_move_from_straddle
-from .base import DataClient, ProviderError
+from .base import DataClient, ProviderError, YahooSession
 
 log = logging.getLogger("marketswarm.options")
 
@@ -239,10 +239,36 @@ def _parse_contract(raw: dict, kind: str) -> Contract | None:
 class OptionsData:
     def __init__(self, client: DataClient):
         self.client = client
+        self.session = YahooSession(client)
+
+    async def _chain_json(self, symbol: str, params: dict | None = None,
+                          use_cache: bool = True) -> dict:
+        """Fetch a chain payload, authenticating the way Yahoo now requires.
+
+        The v7 endpoint answers 401 for every symbol without a session cookie
+        and a matching crumb. A crumb also expires, so a 401 is taken as "stale
+        token" exactly once: refresh and retry. A second 401 is a real refusal
+        and propagates so the agent degrades and the report says so.
+        """
+        await self.session.ensure()
+        url = CHAIN.format(symbol=symbol)
+        try:
+            return await self.client.get_json(
+                url, params=self.session.params(params),
+                use_cache=use_cache, headers=self.session.headers())
+        except ProviderError as exc:
+            if getattr(exc, "status", None) not in (401, 403):
+                raise
+            log.info("yahoo rejected the crumb for %s — refreshing once", symbol)
+            if not await self.session.ensure(refresh=True):
+                raise
+            return await self.client.get_json(
+                url, params=self.session.params(params),
+                use_cache=False, headers=self.session.headers())
 
     async def expirations(self, symbol: str) -> list[dt.date]:
         try:
-            payload = await self.client.get_json(CHAIN.format(symbol=symbol))
+            payload = await self._chain_json(symbol)
             stamps = payload["optionChain"]["result"][0].get("expirationDates", [])
         except (ProviderError, KeyError, IndexError, TypeError) as exc:
             log.warning("expirations %s unavailable: %s", symbol, exc)
@@ -256,7 +282,7 @@ class OptionsData:
                 dt.datetime.combine(expiration, dt.time(0, 0), tzinfo=dt.timezone.utc).timestamp()
             )
         try:
-            payload = await self.client.get_json(CHAIN.format(symbol=symbol), params=params, use_cache=False)
+            payload = await self._chain_json(symbol, params, use_cache=False)
             result = payload["optionChain"]["result"][0]
             quote = result.get("quote", {})
             opt = result["options"][0]

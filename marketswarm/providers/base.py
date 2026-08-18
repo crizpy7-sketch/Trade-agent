@@ -23,7 +23,15 @@ DEFAULT_UA = "marketswarm/1.0 (research agent; contact: set MARKETSWARM_CONTACT)
 
 
 class ProviderError(RuntimeError):
-    """A provider failed in a way the agent should degrade around, not crash on."""
+    """A provider failed in a way the agent should degrade around, not crash on.
+
+    Carries the HTTP status when there was one, so a caller can tell an
+    authentication problem it could fix from an outage it can only wait out.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -185,16 +193,39 @@ class DataClient:
                 await self.limiter.acquire(host)
                 r = await self._client.get(url, params=params, headers=headers)
                 if r.status_code == 429 or r.status_code >= 500:
-                    raise ProviderError(f"{r.status_code} from {host}")
-                r.raise_for_status()
+                    raise ProviderError(f"{r.status_code} from {host}", r.status_code)
+                # A 4xx other than 429 is a statement about the request, not a
+                # transient fault. Retrying it three times with backoff only
+                # makes a broken run slower and noisier — a 401 on every symbol
+                # cost three attempts each before this.
+                if r.status_code >= 400:
+                    raise ProviderError(f"{r.status_code} from {host} for {url}",
+                                        r.status_code)
                 if use_cache:
                     self.cache.set(key, r.text)
                 return r.text
+            except ProviderError as exc:
+                last = exc
+                if exc.status is not None and 400 <= exc.status < 500 and exc.status != 429:
+                    raise
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep((2**attempt) + random.random())
             except Exception as exc:  # noqa: BLE001 - degrade, never crash the run
                 last = exc
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep((2**attempt) + random.random())
-        raise ProviderError(f"GET {url} failed after {self.max_retries} attempts: {last}")
+        status = getattr(last, "status", None)
+        raise ProviderError(
+            f"GET {url} failed after {self.max_retries} attempts: {last}", status)
+
+    @property
+    def http(self) -> httpx.AsyncClient:
+        """The underlying client, for flows that need cookie continuity or must
+        tolerate a non-2xx response. Yahoo's cookie endpoint answers 404 and
+        sets the cookie anyway, which `get_text` would correctly refuse."""
+        if self._client is None:
+            raise ProviderError("DataClient used outside async context manager")
+        return self._client
 
     async def gather(self, coros: list, label: str = "batch") -> list:
         """Run provider calls concurrently, returning None where one failed.
@@ -210,4 +241,92 @@ class DataClient:
                 out.append(None)
             else:
                 out.append(r)
+        return out
+
+
+# --------------------------------------------------------------------------
+# Yahoo authentication
+# --------------------------------------------------------------------------
+
+# Yahoo's edge refuses a non-browser User-Agent on the crumb and options
+# endpoints. This is not an attempt to hide what the agent is — the contact
+# address still travels on every other request, and the rate limiter is
+# unchanged — it is the minimum the endpoint accepts.
+YAHOO_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+YAHOO_COOKIE_URL = "https://fc.yahoo.com/"
+YAHOO_CRUMB_URL = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+
+
+class YahooSession:
+    """Cookie and crumb for Yahoo's query endpoints.
+
+    Yahoo's v7 option-chain endpoint began requiring a session cookie plus a
+    matching crumb, and answers 401 for every symbol without them. The chart
+    endpoint still works unauthenticated, so this is applied where it is needed
+    rather than globally.
+
+    Acquired once and reused. A crumb does expire, so callers pass the 401 back
+    via `refresh=True` and retry exactly once — a crumb that fails twice is a
+    real outage, not a stale token, and must degrade like any other.
+    """
+
+    def __init__(self, client: "DataClient"):
+        self.client = client
+        self._crumb: str | None = None
+        self._lock = asyncio.Lock()
+        self.failed = False
+
+    @property
+    def crumb(self) -> str | None:
+        return self._crumb
+
+    async def ensure(self, refresh: bool = False) -> str | None:
+        async with self._lock:
+            if self._crumb and not refresh:
+                return self._crumb
+            self._crumb = await self._acquire()
+            self.failed = self._crumb is None
+            return self._crumb
+
+    async def _acquire(self) -> str | None:
+        headers = {"User-Agent": YAHOO_BROWSER_UA}
+        try:
+            http = self.client.http
+        except ProviderError:
+            return None
+
+        # Sets the session cookie. It answers 404 by design; the cookie is the
+        # point, so the status is deliberately not checked.
+        try:
+            await http.get(YAHOO_COOKIE_URL, headers=headers, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — no cookie is survivable
+            log.debug("yahoo cookie fetch failed: %s", exc)
+
+        try:
+            r = await http.get(YAHOO_CRUMB_URL, headers=headers, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — degrade, never crash the run
+            log.warning("yahoo crumb unavailable: %s", exc)
+            return None
+
+        crumb = (r.text or "").strip()
+        # A crumb is a short opaque token. An HTML page here means Yahoo served
+        # a consent or block interstitial, and treating that as a crumb would
+        # send garbage on every subsequent call.
+        if r.status_code != 200 or not crumb or len(crumb) > 64 or "<" in crumb:
+            log.warning("yahoo crumb rejected: status=%s len=%d",
+                        r.status_code, len(crumb))
+            return None
+        log.info("yahoo session established")
+        return crumb
+
+    def headers(self) -> dict:
+        return {"User-Agent": YAHOO_BROWSER_UA}
+
+    def params(self, params: dict | None = None) -> dict:
+        out = dict(params or {})
+        if self._crumb:
+            out["crumb"] = self._crumb
         return out
