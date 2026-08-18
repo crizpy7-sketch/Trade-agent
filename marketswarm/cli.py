@@ -365,18 +365,40 @@ async def cmd_daemon(args, cfg: Config) -> int:
         score_at = _parse_hhmm(cfg.score_time_et)
         trading = clock.is_trading_day(today)
 
+        due_run = trading and key_run not in ran and _is_due(now.time(), run_at)
+        due_score = trading and key_score not in ran and _is_due(now.time(), score_at)
+
+        # A slot that is past its window is recorded as missed rather than run
+        # late. `ran` lives in memory, so without this every restart after the
+        # scheduled time re-fires the whole thing — which is how a restart at
+        # 09:52 ET produced a report headed "Pre-Market" 22 minutes after the
+        # open. A pre-market pass that runs mid-session is not late, it is wrong.
+        for key, at, label in ((key_run, run_at, "pre-market run"),
+                               (key_score, score_at, "scoring pass")):
+            if trading and key not in ran and _is_missed(now.time(), at):
+                log.warning("missed today's %s slot (%s ET) — skipping to "
+                            "tomorrow rather than running it late", label, at)
+                ran.add(key)
+
+        task = "run" if due_run else "score" if due_score else None
         try:
-            if trading and now.time() >= run_at and key_run not in ran:
+            if due_run:
                 log.info("scheduled pre-market run")
                 await cmd_run(_ns(date=None, force=False, json=False, no_llm=False), cfg)
                 ran.add(key_run)
-            elif trading and now.time() >= score_at and key_score not in ran:
+            elif due_score:
                 log.info("scheduled scoring pass")
                 await cmd_score(_ns(date=None, postmortem=False), cfg)
                 ran.add(key_score)
         except Exception:  # noqa: BLE001 — a bad day must not kill the daemon
-            log.exception("scheduled task failed; continuing")
-            ran.add(key_run if now.time() < score_at else key_score)
+            log.exception("scheduled %s failed; continuing", task or "task")
+            # Mark the task that actually failed. Inferring it from the clock
+            # meant a run failing after score_at retired the scoring slot and
+            # left the run to retry — the opposite of both intentions.
+            if task == "run":
+                ran.add(key_run)
+            elif task == "score":
+                ran.add(key_score)
 
         sleep_for = _seconds_until_next(now, [run_at, score_at], trading)
         log.info("sleeping %.0f minutes", sleep_for / 60)
@@ -384,6 +406,27 @@ async def cmd_daemon(args, cfg: Config) -> int:
         # Trim the completed-task set so it cannot grow without bound.
         if len(ran) > 20:
             ran = {k for k in ran if k[0] >= (today - dt.timedelta(days=3)).isoformat()}
+
+
+# How late a scheduled slot may still be honoured. Wide enough that an ordinary
+# restart, a slow boot or a clock nudge still runs the day's work; narrow enough
+# that a pre-market pass cannot be published once the session is underway.
+GRACE_MINUTES = 45
+
+
+def _minutes_since(now: dt.time, scheduled: dt.time) -> float:
+    a = now.hour * 60 + now.minute + now.second / 60
+    b = scheduled.hour * 60 + scheduled.minute
+    return a - b
+
+
+def _is_due(now: dt.time, scheduled: dt.time) -> bool:
+    """Scheduled time has passed and we are still inside the grace window."""
+    return 0 <= _minutes_since(now, scheduled) <= GRACE_MINUTES
+
+
+def _is_missed(now: dt.time, scheduled: dt.time) -> bool:
+    return _minutes_since(now, scheduled) > GRACE_MINUTES
 
 
 def _parse_hhmm(value: str) -> dt.time:
