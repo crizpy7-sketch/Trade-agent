@@ -57,8 +57,16 @@ MARKETSWARM_CONTACT=you@example.com
 # Optional: adds authoritative macro series to the economic calendar section.
 #FRED_API_KEY=
 
-# Optional: pushes the morning summary to Discord/Slack.
+# Optional: pushes the morning summary to Discord/Slack (one-way).
 #MARKETSWARM_WEBHOOK=https://discord.com/api/webhooks/...
+
+# Optional: the interactive Discord bot, so you can ask the swarm things.
+# All three are required together — see docs/DISCORD_BOT.md.
+# The allowlist deliberately fails closed: leave it empty and the bot
+# answers nobody rather than answering everybody.
+#MARKETSWARM_DISCORD_BOT_TOKEN=
+#MARKETSWARM_DISCORD_CHANNEL_ID=
+#MARKETSWARM_DISCORD_ALLOWED_USERS=
 
 # Schedule (Eastern Time). The daemon handles DST itself.
 MARKETSWARM_RUN_TIME=08:15
@@ -70,10 +78,14 @@ EOF
     chown root:root "$ENV_FILE"
 fi
 
-log "Installing systemd unit"
+log "Installing systemd units"
 cp "$REPO_DIR/deploy/marketswarm.service" /etc/systemd/system/marketswarm.service
+cp "$REPO_DIR/deploy/marketswarm-bot.service" /etc/systemd/system/marketswarm-bot.service
 systemctl daemon-reload
 systemctl enable marketswarm.service
+# The bot is installed but not enabled: it needs a token and an allowlist first,
+# and a service that starts only to refuse every command is noise.
+log "Bot unit installed (not enabled — configure it, then: systemctl enable --now marketswarm-bot)"
 
 cat <<EOF
 
@@ -83,6 +95,13 @@ Installed.
   2. Verify the setup:      sudo -u $APP_USER $APP_DIR/venv/bin/marketswarm status
   3. Start the daemon:      sudo systemctl start marketswarm
   4. Watch it:              sudo journalctl -u marketswarm -f
+
+Optional — the interactive bot (ask the swarm things in Discord):
+
+  5. Add the three MARKETSWARM_DISCORD_* values to $ENV_FILE
+  6. sudo systemctl enable --now marketswarm-bot
+
+  See docs/DISCORD_BOT.md for how to create the token.
 
 Reports are written to $DATA_DIR/reports (latest.html is always the most recent).
 Run one manually at any time:
