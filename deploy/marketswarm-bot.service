@@ -1,5 +1,5 @@
 [Unit]
-Description=MarketSwarm pre-market intelligence agent
+Description=MarketSwarm interactive Discord bot
 Documentation=https://github.com/crizpy7-sketch/marketswarm
 After=network-online.target
 Wants=network-online.target
@@ -13,12 +13,13 @@ Environment=PYTHONUNBUFFERED=1
 Environment=MARKETSWARM_DATA_DIR=/var/lib/marketswarm
 Environment=MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
 EnvironmentFile=-/etc/marketswarm/env
-ExecStart=/opt/marketswarm/venv/bin/marketswarm --verbose daemon
+ExecStart=/opt/marketswarm/venv/bin/marketswarm --verbose bot
 Restart=always
-RestartSec=30
+RestartSec=10
 TimeoutStopSec=30
 
-# The agent reads public data and writes one directory. Nothing else is needed.
+# The bot reads the database and public quotes. It writes only sqlite's
+# journal, and has no path to publishing or trading. Nothing else is needed.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

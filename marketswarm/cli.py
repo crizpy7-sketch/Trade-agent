@@ -429,6 +429,23 @@ def _is_missed(now: dt.time, scheduled: dt.time) -> bool:
     return _minutes_since(now, scheduled) > GRACE_MINUTES
 
 
+async def cmd_bot(args, cfg: Config) -> int:
+    """Run the interactive Discord bot in the foreground."""
+    from .bot import DiscordBot
+
+    bot = DiscordBot(cfg)
+    ok, why = bot.configured()
+    if not ok:
+        print(f"Discord bot not configured: {why}")
+        print("\nSet these in the environment (or /etc/marketswarm/env):")
+        print("  MARKETSWARM_DISCORD_BOT_TOKEN     the bot token")
+        print("  MARKETSWARM_DISCORD_CHANNEL_ID    the channel to listen in")
+        print("  MARKETSWARM_DISCORD_ALLOWED_USERS your Discord user id(s)")
+        return 2
+    await bot.run_forever()
+    return 0
+
+
 def _parse_hhmm(value: str) -> dt.time:
     try:
         h, m = (int(x) for x in value.split(":"))
@@ -836,6 +853,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show session, config and readiness")
     sub.add_parser("daemon", help="run the scheduler in the foreground (for systemd)")
+    sub.add_parser("bot", help="answer questions in Discord (for systemd)")
 
     i = sub.add_parser("init", help="write a starter config file")
     i.add_argument("path", nargs="?")
@@ -909,6 +927,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(cmd_run(args, cfg))
     if args.command == "score":
         return asyncio.run(cmd_score(args, cfg))
+    if args.command == "bot":
+        try:
+            return asyncio.run(cmd_bot(args, cfg))
+        except KeyboardInterrupt:
+            log.info("bot stopped")
+            return 0
     if args.command == "daemon":
         try:
             return asyncio.run(cmd_daemon(args, cfg))
