@@ -46,6 +46,7 @@ from pathlib import Path
 from . import clock
 from .__init__ import __version__
 from .agents import ALL_AGENTS, AgentReport, SwarmContext
+from .agents.base import DEFAULT_AGENT_TIMEOUT
 from .config import Config
 from .memory import LearningEngine, MemoryStore, Prediction
 from .publication import PublicationSet
@@ -72,6 +73,24 @@ DECISION_AGENTS = ("cross_verify", "risk", "playbook", "red_team")
 
 # Everything else is routed: run only when the Chief Investigator asks for it.
 ORCHESTRATION_MODES = ("dynamic", "full", "legacy")
+
+
+def scaled_timeout(declared: float, budget: float) -> float:
+    """Resolve one agent's timeout against the operator's configured budget.
+
+    `timeout_seconds` is the per-agent budget, and an agent's own `timeout` is a
+    statement of relative need: a scraper that declares twice the standard
+    should still get twice it when the budget moves. So the declared value is
+    scaled by budget/standard rather than capped by it.
+
+    The previous rule was `min(declared, budget * 2)`, which — with the agent
+    default and the config default both at 45s — could only ever *lower* a
+    timeout. Raising `timeout_seconds` to 120 did nothing at all, which is
+    precisely the advice that was given and had to be retracted.
+    """
+    if budget <= 0:
+        return declared
+    return max(1.0, declared * (budget / DEFAULT_AGENT_TIMEOUT))
 
 
 @dataclass
@@ -386,7 +405,7 @@ class Swarm:
         for stage_no, stage in enumerate(stage_agents(wanted), 1):
             instances = [a() for a in stage]
             for inst in instances:
-                inst.timeout = min(inst.timeout, self.config.timeout_seconds * 2)
+                inst.timeout = scaled_timeout(inst.timeout, self.config.timeout_seconds)
             log.info("  stage %d (%s): %s", stage_no, reason,
                      ", ".join(i.name for i in instances))
             reports = await asyncio.gather(*(i.execute(ctx) for i in instances))

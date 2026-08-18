@@ -73,12 +73,20 @@ class AgentReport:
         }
 
 
+# The standard per-agent budget. An agent that declares something else is
+# stating a *relative* need — "I want twice the standard" — which the
+# orchestrator scales against the operator's configured budget rather than
+# treating as an absolute. Config and this constant share a value so that an
+# untouched config changes nothing.
+DEFAULT_AGENT_TIMEOUT = 45.0
+
+
 class BaseAgent:
     """Subclasses implement `run(ctx) -> AgentReport`."""
 
     name: str = "base"
     description: str = ""
-    timeout: float = 45.0
+    timeout: float = DEFAULT_AGENT_TIMEOUT
     # Agents whose output this one consumes. The orchestrator uses this to
     # stage execution; agents with no dependencies all run concurrently.
     depends_on: tuple[str, ...] = ()
