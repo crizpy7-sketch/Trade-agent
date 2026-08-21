@@ -85,11 +85,11 @@ systemctl daemon-reload
 systemctl enable marketswarm.service
 # The bot is installed but not enabled: it needs a token and an allowlist first,
 # and a service that starts only to refuse every command is noise.
-# The service unit sets the data directory explicitly; the CLI's own default is
-# ~/.marketswarm, which for this user resolves to a *second*, empty directory
-# beside the real one. A hand-run "marketswarm status" without these reports
-# cheerfully on the wrong place, so every command printed below carries them.
-RUN_CLI="sudo -u $APP_USER env MARKETSWARM_DATA_DIR=$DATA_DIR MARKETSWARM_REPORT_DIR=$DATA_DIR/reports $APP_DIR/venv/bin/marketswarm"
+# One correct way to run the CLI by hand. Invoking the venv binary directly
+# misses both the data directory and the credentials file, and the result is a
+# confident report about the wrong environment rather than an error.
+install -m 755 "$REPO_DIR/deploy/marketswarm-cli" /usr/local/bin/marketswarm-cli
+RUN_CLI="sudo marketswarm-cli"
 
 log "Bot unit installed (not enabled — configure it, then: systemctl enable --now marketswarm-bot)"
 

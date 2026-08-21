@@ -138,11 +138,7 @@ else
     warn "Update finished with problems. The database backup above is intact."
 fi
 
-# The service unit sets the data directory explicitly; the CLI's own default is
-# ~/.marketswarm, which for this user resolves to a *second*, empty directory
-# beside the real one. A hand-run "marketswarm status" without these reports
-# cheerfully on the wrong place, so every command printed below carries them.
-RUN_CLI="sudo -u $APP_USER env MARKETSWARM_DATA_DIR=$DATA_DIR MARKETSWARM_REPORT_DIR=$DATA_DIR/reports $APP_DIR/venv/bin/marketswarm"
+RUN_CLI="sudo marketswarm-cli"   # installed by install.sh, above
 
 cat <<EOF
 

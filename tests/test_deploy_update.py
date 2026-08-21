@@ -63,22 +63,21 @@ def test_the_no_database_message_shows_what_it_looked_at():
 INSTALL = (Path(__file__).resolve().parent.parent / "deploy" / "install.sh").read_text()
 
 
-def _cli_invocations(script: str) -> list[str]:
-    return [ln.strip() for ln in script.splitlines()
-            if "venv/bin/marketswarm" in ln and not ln.strip().startswith("#")]
+def test_the_scripts_never_invoke_the_venv_binary_directly():
+    """Every hand-run route must go through the wrapper.
 
-
-def test_every_printed_cli_command_sets_the_data_directory():
-    """The service sets MARKETSWARM_DATA_DIR; the CLI's default is elsewhere.
-
-    A printed ``marketswarm status`` without it reads ~/.marketswarm — for this
-    system user, an empty directory sitting right beside the real one — and
-    reports a healthy, empty swarm. Wrong place, reassuring answer.
+    The venv binary on its own misses the data directory (reading an empty
+    ~/.marketswarm beside the real one) and the credentials file (a configured
+    webhook reporting as "not set"). Both answer confidently about the wrong
+    environment. The wrapper is the only place that path may appear.
     """
-    for script, name in ((INSTALL, "install.sh"), (SCRIPT, "update.sh")):
-        for line in _cli_invocations(script):
-            assert "MARKETSWARM_DATA_DIR" in line, \
-                f"{name} invokes the CLI without a data directory: {line}"
+    docs = (Path(__file__).resolve().parent.parent / "INSTALL.txt").read_text()
+    for script, name in ((INSTALL, "install.sh"), (SCRIPT, "update.sh"),
+                         (docs, "INSTALL.txt")):
+        offenders = [ln.strip() for ln in script.splitlines()
+                     if "venv/bin/marketswarm" in ln and not ln.strip().startswith("#")]
+        assert not offenders, \
+            f"{name} runs the CLI without the wrapper: {offenders}"
 
 
 def test_the_cli_prefix_is_defined_once_per_script():
@@ -86,3 +85,55 @@ def test_the_cli_prefix_is_defined_once_per_script():
     for script, name in ((INSTALL, "install.sh"), (SCRIPT, "update.sh")):
         defs = [ln for ln in script.splitlines() if ln.startswith("RUN_CLI=")]
         assert len(defs) == 1, f"{name} defines RUN_CLI {len(defs)} times"
+
+
+# ------------------------------------------------------- the CLI wrapper
+
+DEPLOY = Path(__file__).resolve().parent.parent / "deploy"
+WRAPPER = (DEPLOY / "marketswarm-cli").read_text()
+UNIT = (DEPLOY / "marketswarm.service").read_text()
+
+
+def _unit_env(name: str) -> str:
+    for line in UNIT.splitlines():
+        if line.startswith(f"Environment={name}="):
+            return line.split("=", 2)[2]
+    raise AssertionError(f"{name} is not set in marketswarm.service")
+
+
+def test_the_wrapper_uses_the_same_directories_as_the_service():
+    """The whole point of the wrapper is to be the service's environment.
+
+    If these drift, a hand-run check reports on a different directory than the
+    daemon writes to — and reports it confidently.
+    """
+    for var in ("MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"):
+        assert f"{var}={_unit_env(var)}\n" in WRAPPER, \
+            f"{var} in marketswarm-cli does not match marketswarm.service"
+
+
+def test_the_wrapper_runs_as_the_same_user_and_binary_as_the_service():
+    user = next(l.split("=", 1)[1] for l in UNIT.splitlines() if l.startswith("User="))
+    exec_start = next(l for l in UNIT.splitlines() if l.startswith("ExecStart="))
+    binary = exec_start.split("=", 1)[1].split()[0]
+    assert f"-u {user} {binary}" in WRAPPER, \
+        "marketswarm-cli runs a different user or binary than the service does"
+
+
+def test_the_wrapper_loads_the_credentials_file():
+    """Without it, a configured webhook reports as 'not set'."""
+    assert ". /etc/marketswarm/env" in WRAPPER
+
+
+def test_the_wrapper_keeps_secrets_out_of_the_process_list():
+    """/proc/<pid>/cmdline is world-readable; the environment is not.
+
+    Passing the env file through `env $(cat ...)` or xargs would put the Discord
+    token where any local account can read it.
+    """
+    for bad in ("xargs", "env $(", "$(cat /etc/marketswarm/env)", "$(grep"):
+        assert bad not in WRAPPER, f"marketswarm-cli exposes secrets via {bad!r}"
+
+
+def test_the_installer_installs_the_wrapper():
+    assert "marketswarm-cli" in INSTALL, "install.sh never installs the wrapper"

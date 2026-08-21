@@ -39,7 +39,7 @@ that do not identify themselves. Everything else is optional.
 
 Check it is working, then start it:
 
-    sudo -u marketswarm /opt/marketswarm/venv/bin/marketswarm status
+    sudo marketswarm-cli status
     sudo systemctl start marketswarm
     sudo journalctl -u marketswarm -f
 
