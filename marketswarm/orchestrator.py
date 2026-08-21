@@ -69,7 +69,10 @@ SCAN_AGENTS = ("overnight_scan", "futures", "volatility_regime", "technicals")
 
 # Synthesis. These consume whatever the scan and the selected specialists
 # produced, and they always run — without them there is nothing to review.
-DECISION_AGENTS = ("cross_verify", "risk", "playbook", "red_team")
+# Sentiment owns the permissioned community intake. It runs before fusion on
+# every session so configured Discord/TradingView/X evidence cannot disappear
+# merely because today's deterministic event label chose a different route.
+DECISION_AGENTS = ("sentiment", "cross_verify", "risk", "playbook", "red_team")
 
 # Everything else is routed: run only when the Chief Investigator asks for it.
 ORCHESTRATION_MODES = ("dynamic", "full", "legacy")
@@ -195,6 +198,18 @@ class SwarmResult:
         """Every active recommendation, including the non-directional ones a
         `{calls, puts, stocks}` view cannot express."""
         return self.publication.active()
+
+    @property
+    def screened_ideas(self) -> dict:
+        """Three call and three put screening slots, safety-labelled.
+
+        Unlike :attr:`ideas`, this may include rejected audit candidates and
+        explicit empty slots. It is display-only and is never persisted as a
+        prediction, monitored, scored, or treated as an active recommendation.
+        """
+        playbook = self.reports.get("playbook")
+        data = playbook.data if playbook and playbook.usable else {}
+        return self.publication.screening_view(data, slots=3)
 
     @property
     def duration_seconds(self) -> float:
@@ -652,6 +667,19 @@ class Swarm:
             fresh = [a for a in agents if a in known and a not in ctx.reports]
             current["open_questions"] = list(questions)
             if not fresh:
+                reusable = [a for a in agents
+                            if getattr(ctx.reports.get(a), "usable", False)]
+                if reusable:
+                    # Another candidate may already have requested the same
+                    # evidence. Reuse it and let this candidate rebuild its
+                    # graph; "not new" is not the same as "not available".
+                    current["followup_agents"] = reusable
+                    current["followup_note"] = (
+                        "follow-up requested; reused evidence already obtained "
+                        "this session from " + ", ".join(reusable))
+                    current.pop("followup_failed", None)
+                    current.pop("followup_error", None)
+                    return current
                 current["followup_note"] = (
                     "follow-up requested; every agent that could answer it had "
                     "already run this session")
@@ -761,9 +789,9 @@ class Swarm:
                         revision_count, model_version, system_version, experiment_id,
                         resolved, status, candidate_id, evidence_graph_id,
                         review_decision_id, revision_parent_id, orchestration_mode,
-                        source_kind)
+                        source_kind, presentation_payload)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                               ?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
+                               ?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)""",
                     (rec.id, rec.investigation_id, result.run_id, rec.created_at,
                      result.run_date.isoformat(), rec.subject, rec.rec_type.value,
                      rec.conviction.value, rec.direction, rec.forecast_probability,
@@ -780,7 +808,8 @@ class Swarm:
                      rec.experiment_id, status, rec.candidate_id,
                      rec.evidence_graph_id, rec.review_decision_id,
                      rec.revision_parent_id, result.trace.orchestration_mode,
-                     rec.source_kind))
+                     rec.source_kind,
+                     json.dumps(rec.source_payload, default=str)[:200000]))
 
             self._persist_review_rounds(result)
 
@@ -788,18 +817,28 @@ class Swarm:
                 conn.execute(
                     """INSERT OR REPLACE INTO recommendations
                        (id, run_id, created_at, run_date, subject, rec_type,
-                        conviction, confidence, original_confidence, resolved,
-                        status, candidate_id, rejection_reason, review_audit,
-                        orchestration_mode, system_version)
-                       VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)""",
+                        conviction, direction, forecast_probability, confidence,
+                        original_confidence, expected_r, entry, target, stop,
+                        resolved, status, candidate_id, rejection_reason,
+                        review_audit, orchestration_mode, system_version,
+                        source_kind, presentation_payload)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)""",
                     (rej.candidate_id, result.run_id,
                      dt.datetime.now(dt.timezone.utc).isoformat(),
                      result.run_date.isoformat(), rej.subject, "REJECTED",
-                     "REJECTED_BY_REVIEW", 0, rej.original_confidence,
+                     "REJECTED_BY_REVIEW",
+                     rej.source_payload.get("direction"),
+                     rej.source_payload.get("probability"),
+                     0, rej.original_confidence,
+                     rej.source_payload.get("expected_r"),
+                     rej.source_payload.get("entry"),
+                     rej.source_payload.get("target"),
+                     rej.source_payload.get("stop"),
                      rej.status.value, rej.candidate_id, rej.reason,
                      json.dumps(rej.audit)[:200000],
                      result.trace.orchestration_mode,
-                     __version__))
+                     __version__, rej.source_kind,
+                     json.dumps(rej.source_payload, default=str)[:200000]))
             conn.commit()
         except sqlite3.Error as exc:
             log.error("failed to persist recommendations: %s", exc)

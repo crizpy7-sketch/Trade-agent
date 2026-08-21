@@ -281,6 +281,7 @@ class PlaybookAgent(BaseAgent):
         profiles = ctx.data_of("overnight_scan", "profiles", {}) or {}
         earnings_reacting = {a["ticker"]: a for a in (ctx.data_of("earnings", "reacting", []) or [])}
         filings_high = set(ctx.data_of("sec_filings", "high_impact", []) or [])
+        community_reads = ctx.data_of("sentiment", "symbol_reads", {}) or {}
         regime = ctx.data_of("volatility_regime", "regime", "unknown")
         calibrator = ctx.config.calibrator
 
@@ -345,77 +346,114 @@ class PlaybookAgent(BaseAgent):
             elif rsi and rsi < 25:
                 sym_signals.append(bayes.Signal("washed_out", 0.55, weight=0.4, note=f"RSI {rsi:.0f}"))
 
+            social = community_reads.get(sym) or {}
+            if social.get("qualifies"):
+                sym_signals.append(bayes.Signal(
+                    "community_consensus",
+                    float(social.get("probability_up", 0.5)),
+                    # Social evidence is gameable and reflexive. Even after the
+                    # independent-author rule it is capped below every measured
+                    # market input and can only nudge a symbol read.
+                    weight=0.25,
+                    note=(f"permissioned community: {social.get('long_sources', 0)} long / "
+                          f"{social.get('short_sources', 0)} short across "
+                          f"{social.get('independent_sources', 0)} independent sources"),
+                ))
+
             fused = bayes.fuse(sym_signals, prior=0.5, correlation=ctx.config.signal_correlation)
             raw_p = fused.probability
             p_sym = calibrator.transform(raw_p) if calibrator else raw_p
 
-            long_bias = p_sym >= 0.5
-            direction = "long" if long_bias else "short"
             implied_pct = (flow or {}).get("implied_move_pct")
             # The implied move is the ceiling on any target: beyond it, the idea
             # is betting against the option market's own distribution.
             max_reach = price * (implied_pct / 100) if implied_pct else atr * 0.8
 
-            bracket = _build_bracket(
-                price=price,
-                atr=atr,
-                max_reach=max_reach,
-                long_side=long_bias,
-                support=(s.get("support") or {}).get("price"),
-                resistance=(s.get("resistance") or {}).get("price"),
-            )
-            if bracket is None:
-                continue                     # no room between structure and the implied move
-            entry, target, stop = bracket
-
-            # The probability that actually matters: target before stop.
-            drift = (p_sym - 0.5) * sigma * 2
-            barrier = dist.barrier_probabilities(
-                entry=entry, target=target, stop=stop, sigma_daily=sigma,
-                horizon_days=1.0, drift_daily=drift, n_paths=8000,
-                seed=0,   # deterministic: identical inputs must give identical reports
-            )
-            trade = edgemod.evaluate_bracket(
-                barrier, entry, target, stop,
-                cost_r=ctx.config.friction_r if sym in ("SPY", "QQQ") else ctx.config.friction_r * 1.6,
-            )
-
             _, sym_conf = bayes.probability_to_confidence_label(
                 p_sym, fused.effective_n, float(np.std([x.probability for x in sym_signals])) * 2
             )
-            sym_conf = int(round(sym_conf * 0.6 + conf_score * 0.4))
+            sym_conf = round(sym_conf * 0.6 + conf_score * 0.4)
+            primary_direction = "long" if p_sym >= 0.5 else "short"
 
-            math_note = (
-                f"Monte Carlo (Student-t, df=4, {8000:,} paths, σ={sigma*100:.2f}%/day): "
-                f"P(target first) {barrier.p_target_first:.0%}, P(stop first) {barrier.p_stop_first:.0%}, "
-                f"P(neither barrier) {barrier.p_neither:.0%} — of those, {barrier.p_neither_positive:.0%} "
-                f"close green, averaging {barrier.mean_r_neither:+.2f}R. "
-                f"Overall P(profit) {trade.p_win:.0%}. R:R {trade.reward_risk:.2f}, "
-                f"breakeven {trade.breakeven_p:.0%}, expected {trade.expected_r:+.2f}R "
-                f"({trade.edge_after_costs:+.2f}R after costs). "
-                f"Quarter-Kelly sizing {trade.suggested_risk_pct:.2f}% of account. {trade.verdict}."
-            )
+            # Screen both sides of every liquid chain. This creates three call
+            # and three put *candidate slots* without manufacturing an edge:
+            # the counter-thesis normally has worse probability/EV and is
+            # labelled WATCH ONLY or REJECTED downstream. Only the primary
+            # direction is eligible for the stock-setup list.
+            for direction in ("long", "short"):
+                long_side = direction == "long"
+                bracket = _build_bracket(
+                    price=price,
+                    atr=atr,
+                    max_reach=max_reach,
+                    long_side=long_side,
+                    support=(s.get("support") or {}).get("price"),
+                    resistance=(s.get("resistance") or {}).get("price"),
+                )
+                if bracket is None:
+                    continue                 # no sane structure for this side
+                entry, target, stop = bracket
 
-            evidence = [sig.note for sig in sym_signals if sig.note]
-            invalidation = _invalidation_text(sym, direction, entry, stop, s, regime, gap)
+                # Both sides see the same underlying drift; the barrier geometry
+                # determines whether the call or put reaches its target first.
+                drift = (p_sym - 0.5) * sigma * 2
+                barrier = dist.barrier_probabilities(
+                    entry=entry, target=target, stop=stop, sigma_daily=sigma,
+                    horizon_days=1.0, drift_daily=drift, n_paths=8000,
+                    seed=0,   # deterministic: identical inputs produce identical reports
+                )
+                trade = edgemod.evaluate_bracket(
+                    barrier, entry, target, stop,
+                    cost_r=(ctx.config.friction_r if sym in ("SPY", "QQQ")
+                            else ctx.config.friction_r * 1.6),
+                )
 
-            rationale = _rationale_text(sym, direction, s, gap, p_sym, barrier, earnings_reacting.get(sym))
+                math_note = (
+                    f"Monte Carlo (Student-t, df=4, {8000:,} paths, σ={sigma*100:.2f}%/day): "
+                    f"P(target first) {barrier.p_target_first:.0%}, P(stop first) {barrier.p_stop_first:.0%}, "
+                    f"P(neither barrier) {barrier.p_neither:.0%} — of those, {barrier.p_neither_positive:.0%} "
+                    f"close green, averaging {barrier.mean_r_neither:+.2f}R. "
+                    f"Overall P(profit) {trade.p_win:.0%}. R:R {trade.reward_risk:.2f}, "
+                    f"breakeven {trade.breakeven_p:.0%}, expected {trade.expected_r:+.2f}R "
+                    f"({trade.edge_after_costs:+.2f}R after costs). "
+                    f"Quarter-Kelly sizing {trade.suggested_risk_pct:.2f}% of account. {trade.verdict}."
+                )
 
-            base = dict(
-                symbol=sym, direction=direction, entry=round(entry, 2), target=round(target, 2),
-                stop=round(stop, 2), probability=round(barrier.p_target_first, 4),
-                raw_probability=round(raw_p, 4), expected_r=round(trade.edge_after_costs, 3),
-                confidence=sym_conf, rationale=rationale, invalidation=invalidation,
-                liquidity=liquidity, evidence=evidence, math_note=math_note,
-                ev_verdict=trade.verdict,
-                clears_bar=trade.edge_after_costs > ctx.config.min_expected_r,
-            )
+                evidence = [sig.note for sig in sym_signals if sig.note]
+                if direction != primary_direction:
+                    evidence.append(
+                        f"Counter-thesis screen: the fused directional read favours "
+                        f"{primary_direction}; this side must earn its place on path probability "
+                        f"and expected value, not symmetry."
+                    )
+                invalidation = _invalidation_text(sym, direction, entry, stop, s, regime, gap)
+                rationale = _rationale_text(
+                    sym, direction, s, gap, p_sym, barrier, earnings_reacting.get(sym)
+                )
 
-            stock_ideas.append(Idea(kind="stock", **base))
-            option = _build_option_leg(flow, price, direction, target, stop, sigma)
-            if option:
-                idea = Idea(kind="call" if direction == "long" else "put", **{**base, **option})
-                (call_ideas if direction == "long" else put_ideas).append(idea)
+                base = {
+                    "symbol": sym, "direction": direction, "entry": round(entry, 2),
+                    "target": round(target, 2), "stop": round(stop, 2),
+                    "probability": round(barrier.p_target_first, 4),
+                    "raw_probability": round(raw_p if long_side else 1 - raw_p, 4),
+                    "expected_r": round(trade.edge_after_costs, 3),
+                    "confidence": (sym_conf if direction == primary_direction
+                                   else max(0, sym_conf - 10)),
+                    "rationale": rationale, "invalidation": invalidation,
+                    "liquidity": liquidity, "evidence": evidence, "math_note": math_note,
+                    "ev_verdict": trade.verdict,
+                    "clears_bar": trade.edge_after_costs > ctx.config.min_expected_r,
+                }
+
+                if direction == primary_direction:
+                    stock_ideas.append(Idea(kind="stock", **base))
+                option = _build_option_leg(flow, price, direction, target, stop, sigma)
+                if option:
+                    idea = Idea(
+                        kind="call" if long_side else "put",
+                        **{**base, **option},
+                    )
+                    (call_ideas if long_side else put_ideas).append(idea)
 
         def rank(ideas: list[Idea], n: int) -> list[Idea]:
             """Positive-expectancy ideas first, then the least-bad remainder.

@@ -288,6 +288,14 @@ def cmd_status(args, cfg: Config) -> int:
     print(f"  FRED         {'configured' if cfg.fred_api_key else 'not set (macro levels limited)'}")
     print(f"  Anthropic    {'configured' if cfg.anthropic_api_key else 'not set (no narrative)'}")
     print(f"  Webhook      {'configured' if cfg.webhook_url else 'not set'}")
+    print(f"  Social Discord {len(cfg.community_discord_channel_ids)} permitted channel(s)"
+          if cfg.community_discord_channel_ids else
+          "  Social Discord not set (no community/TradingView intake)")
+    if cfg.x_handles:
+        print(f"  X research   {len(cfg.x_handles)} allowlisted handle(s); "
+              f"API {'configured' if cfg.x_bearer_token else 'token missing'}")
+    else:
+        print("  X research   not set")
     print(f"  SEC contact  {cfg.contact_email}")
     if cfg.contact_email.startswith("set "):
         print("               ⚠ set MARKETSWARM_CONTACT to a real email — SEC throttles anonymous clients")
@@ -326,6 +334,10 @@ def cmd_init(args, cfg: Config) -> int:
     print("  ANTHROPIC_API_KEY=sk-ant-...           # optional, enables the narrative")
     print("  FRED_API_KEY=...                       # optional, adds macro series")
     print("  MARKETSWARM_WEBHOOK=https://...        # optional, pushes the summary")
+    print("  MARKETSWARM_DISCORD_BOT_TOKEN=...      # bot commands/community intake")
+    print("  MARKETSWARM_SOCIAL_DISCORD_CHANNEL_IDS=... # permitted research intake")
+    print("  MARKETSWARM_X_HANDLES=handle1,handle2  # explicit X allowlist")
+    print("  X_BEARER_TOKEN=...                     # optional official X API")
     return 0
 
 

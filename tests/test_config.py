@@ -64,3 +64,40 @@ def test_secrets_never_serialised_to_yaml(tmp_path, monkeypatch):
     dumped = cfg.to_yaml()
     assert "sk-ant-secret-value" not in dumped
     assert "fred-secret-value" not in dumped
+
+
+def test_secrets_in_yaml_are_ignored(tmp_path, monkeypatch):
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "anthropic_api_key: yaml-secret\n"
+        "discord_bot_token: yaml-discord-secret\n"
+        "x_bearer_token: yaml-x-secret\n"
+    )
+    monkeypatch.setenv("MARKETSWARM_DATA_DIR", str(tmp_path / "s"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("MARKETSWARM_DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("X_BEARER_TOKEN", raising=False)
+    cfg = Config.load(cfgfile)
+    assert cfg.anthropic_api_key is None
+    assert cfg.discord_bot_token is None
+    assert cfg.x_bearer_token is None
+
+
+def test_community_env_parses_allowlists_bounds_values_and_keeps_tokens_secret(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("MARKETSWARM_DATA_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("MARKETSWARM_SOCIAL_DISCORD_CHANNEL_IDS", "111, 222 111")
+    monkeypatch.setenv("MARKETSWARM_X_HANDLES", "@Alice, bob @Alice")
+    monkeypatch.setenv("MARKETSWARM_DISCORD_BOT_TOKEN", "discord-secret-token")
+    monkeypatch.setenv("X_BEARER_TOKEN", "x-secret-token")
+    monkeypatch.setenv("MARKETSWARM_COMMUNITY_LOOKBACK_HOURS", "999")
+    monkeypatch.setenv("MARKETSWARM_COMMUNITY_MIN_SOURCES", "1")
+
+    cfg = Config.load(tmp_path / "none.yaml")
+    assert cfg.community_discord_channel_ids == ["111", "222"]
+    assert cfg.x_handles == ["alice", "bob"]
+    assert cfg.community_lookback_hours == 168
+    assert cfg.community_min_sources == 2
+    dumped = cfg.to_yaml()
+    assert "discord-secret-token" not in dumped
+    assert "x-secret-token" not in dumped

@@ -176,12 +176,13 @@ DEFAULT_CAPABILITIES: list[AgentCapability] = [
     ),
     AgentCapability(
         name="sentiment",
-        specialties=["measurable positioning proxies"],
-        supported_event_types=[_E.VOLATILITY_SPIKE, _E.INDEX_MOVE, _E.QUIET],
+        specialties=["measurable positioning proxies", "permissioned community research"],
+        supported_event_types=list(EventType),
         expected_cost=0.5, expected_latency_ms=500,
         required_inputs=["volatility_regime", "options_flow"],
         output_schema=["score", "label"],
-        produces_index_signal=True,
+        produces_index_signal=True, produces_symbol_signal=True,
+        always_run=True,
         evidence_clusters=["sentiment"],
     ),
     AgentCapability(
