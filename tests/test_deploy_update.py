@@ -169,6 +169,13 @@ def test_the_wrapper_runs_as_the_same_user_and_binary_as_the_service():
         "marketswarm-cli runs a different user or binary than the service does"
 
 
+def test_the_wrapper_uses_the_target_users_home():
+    """Keeping root's HOME makes Config.load() probe /root and fail permission checks."""
+    user = _unit_field("User=")
+    assert f"sudo -H -E -u {user}" in WRAPPER, \
+        "marketswarm-cli preserves root's HOME instead of using the service user's home"
+
+
 def test_the_credentials_file_can_override_the_wrapper_defaults():
     """Precedence has to match the unit, which sets Environment= before
     EnvironmentFile= and so lets /etc/marketswarm/env win.
