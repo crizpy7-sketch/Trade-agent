@@ -138,11 +138,17 @@ else
     warn "Update finished with problems. The database backup above is intact."
 fi
 
+# The service unit sets the data directory explicitly; the CLI's own default is
+# ~/.marketswarm, which for this user resolves to a *second*, empty directory
+# beside the real one. A hand-run "marketswarm status" without these reports
+# cheerfully on the wrong place, so every command printed below carries them.
+RUN_CLI="sudo -u $APP_USER env MARKETSWARM_DATA_DIR=$DATA_DIR MARKETSWARM_REPORT_DIR=$DATA_DIR/reports $APP_DIR/venv/bin/marketswarm"
+
 cat <<EOF
 
 Check it did what you expect:
 
-  marketswarm status        sudo -u $APP_USER $APP_DIR/venv/bin/marketswarm status
+  marketswarm status        $RUN_CLI status
   live logs                 sudo journalctl -u marketswarm -f
   force a run now           sudo systemctl start marketswarm
 

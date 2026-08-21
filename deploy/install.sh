@@ -85,6 +85,12 @@ systemctl daemon-reload
 systemctl enable marketswarm.service
 # The bot is installed but not enabled: it needs a token and an allowlist first,
 # and a service that starts only to refuse every command is noise.
+# The service unit sets the data directory explicitly; the CLI's own default is
+# ~/.marketswarm, which for this user resolves to a *second*, empty directory
+# beside the real one. A hand-run "marketswarm status" without these reports
+# cheerfully on the wrong place, so every command printed below carries them.
+RUN_CLI="sudo -u $APP_USER env MARKETSWARM_DATA_DIR=$DATA_DIR MARKETSWARM_REPORT_DIR=$DATA_DIR/reports $APP_DIR/venv/bin/marketswarm"
+
 log "Bot unit installed (not enabled — configure it, then: systemctl enable --now marketswarm-bot)"
 
 cat <<EOF
@@ -92,7 +98,7 @@ cat <<EOF
 Installed.
 
   1. Edit credentials:      sudo nano $ENV_FILE
-  2. Verify the setup:      sudo -u $APP_USER $APP_DIR/venv/bin/marketswarm status
+  2. Verify the setup:      $RUN_CLI status
   3. Start the daemon:      sudo systemctl start marketswarm
   4. Watch it:              sudo journalctl -u marketswarm -f
 
@@ -106,6 +112,6 @@ Optional — the interactive bot (ask the swarm things in Discord):
 Reports are written to $DATA_DIR/reports (latest.html is always the most recent).
 Run one manually at any time:
 
-  sudo -u $APP_USER $APP_DIR/venv/bin/marketswarm run
+  $RUN_CLI run
 
 EOF
