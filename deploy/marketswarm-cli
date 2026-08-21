@@ -35,4 +35,7 @@ set -a
 [ -r /etc/marketswarm/env ] && . /etc/marketswarm/env
 set +a
 
-exec sudo -E -u marketswarm /opt/marketswarm/venv/bin/marketswarm "$@"
+# -H gives the service user its own home directory. Without it, sudo -E keeps
+# root’s HOME and Config.load() tries to stat /root/.marketswarm/config.yaml,
+# which the locked-down service user must not be able to read.
+exec sudo -H -E -u marketswarm /opt/marketswarm/venv/bin/marketswarm "$@"
