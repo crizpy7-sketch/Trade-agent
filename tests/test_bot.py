@@ -110,7 +110,7 @@ def test_a_failing_command_reports_instead_of_killing_the_bot(cfg):
 
 def test_help_lists_the_commands_and_states_the_limits(cfg):
     reply = handle(bot(cfg), msg("!help"))
-    for cmd in ("!status", "!today", "!ticker", "!why", "!calibration"):
+    for cmd in ("!status", "!today", "!plays", "!ticker", "!why", "!calibration"):
         assert cmd in reply
     # The bot must not imply it can act.
     assert "cannot run the swarm" in reply
@@ -132,6 +132,13 @@ def test_today_on_an_empty_database_says_so_rather_than_inventing(cfg):
 def test_calibration_with_no_history_makes_no_claim(cfg):
     reply = handle(bot(cfg), msg("!calibration"))
     assert "nothing to calibrate" in reply.lower() or "No resolved" in reply
+
+
+def test_plays_always_has_three_calls_and_three_puts_even_without_data(cfg):
+    reply = handle(bot(cfg), msg("!plays"))
+    assert "__Calls__" in reply and "__Puts__" in reply
+    assert reply.count("**DATA UNAVAILABLE**") == 6
+    assert "does not mean six trades" in reply
 
 
 def test_a_ticker_lookup_survives_the_quote_provider_being_down(cfg, monkeypatch):

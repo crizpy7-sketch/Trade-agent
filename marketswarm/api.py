@@ -11,6 +11,7 @@ served by FastAPI, Flask, a CLI, or a template without changing anything.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -187,6 +188,76 @@ class ReadOnlyAPI:
                         "resolved": bool(rec.get("resolved"))},
         }
 
+    def screened_options(self, run_date: str | None = None,
+                         slots: int = 3) -> dict[str, list[dict]]:
+        """Fixed call/put screening board for the Discord ``!plays`` command.
+
+        Rejected rows are returned only with an explicit status and reason.
+        This read surface does not change the active recommendation query and
+        cannot make a rejected candidate trackable.
+        """
+        slots = max(1, min(int(slots), 10))
+        if run_date is None:
+            try:
+                latest = self.conn.execute(
+                    "SELECT run_date FROM recommendations "
+                    "WHERE source_kind IN ('call','put') "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                run_date = str(latest[0]) if latest else None
+            except sqlite3.Error:
+                run_date = None
+
+        out: dict[str, list[dict]] = {"calls": [], "puts": []}
+        if run_date:
+            rows = self._rows(
+                "SELECT subject, source_kind, status, rec_type, conviction, "
+                "direction, forecast_probability probability, confidence, "
+                "expected_r, entry, target, stop, rejection_reason, created_at, "
+                "presentation_payload "
+                "FROM recommendations WHERE run_date=? "
+                "AND source_kind IN ('call','put') "
+                "ORDER BY CASE status WHEN 'APPROVED' THEN 0 WHEN 'MODIFIED' THEN 0 "
+                "WHEN 'REJECTED' THEN 1 ELSE 2 END, expected_r DESC, confidence DESC",
+                (run_date,),
+            )
+            for row in rows:
+                payload = _json_object(row.pop("presentation_payload", None))
+                for field in ("strike", "expiration", "option_entry",
+                              "option_target", "option_stop"):
+                    if payload.get(field) is not None:
+                        row[field] = payload[field]
+                key = "calls" if row.get("source_kind") == "call" else "puts"
+                status = row.get("status")
+                actionable = (
+                    status in self.ACTIVE_STATUSES
+                    and row.get("rec_type") in ("FAVORABLE", "UNFAVORABLE")
+                    and row.get("conviction") in ("HIGH_CONVICTION", "MODERATE_CONVICTION")
+                )
+                if actionable:
+                    screen_status, reason = "QUALIFIED", "cleared both gates"
+                elif status in self.ACTIVE_STATUSES:
+                    screen_status, reason = "WATCH ONLY", str(row.get("rec_type") or "no edge")
+                elif status == "REJECTED":
+                    screen_status, reason = "REJECTED", str(row.get("rejection_reason") or "review gate")
+                else:
+                    screen_status, reason = "WITHHELD", str(row.get("rejection_reason") or status)
+                row.update({"screen_status": screen_status,
+                            "screen_reason": reason, "run_date": run_date})
+                if len(out[key]) < slots:
+                    out[key].append(row)
+
+        for key, kind in (("calls", "call"), ("puts", "put")):
+            while len(out[key]) < slots:
+                out[key].append({
+                    "subject": None,
+                    "source_kind": kind,
+                    "screen_status": "DATA UNAVAILABLE",
+                    "screen_reason": "no reviewed contract available for this slot",
+                    "run_date": run_date,
+                })
+        return out
+
     # ---------- performance & learning ----------
 
     def performance(self, days: int = 90) -> dict:
@@ -287,6 +358,19 @@ class ReadOnlyAPI:
             # rather than failing a dashboard render.
             log.debug("query failed (%s): %s", q.split()[3] if len(q.split()) > 3 else "?", exc)
             return []
+
+
+def _json_object(raw) -> dict:
+    """Decode optional presentation JSON without making reads fragile."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def open_api(db_path) -> ReadOnlyAPI:

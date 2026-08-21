@@ -256,12 +256,14 @@ language model.
 | Newswires | Reuters, AP | 0.82 |
 | Financial media | CNBC, MarketWatch | 0.70 |
 | Aggregators | Google News, Yahoo | 0.58–0.62 |
-| Social sentiment | *deliberately excluded* | — |
+| Permissioned community posts | Discord intake, TradingView alerts/links, allowlisted X accounts | 0.30 |
 
 Priors are cold-start values only; they are replaced by scored performance as
-the agent accumulates history. Social sentiment is excluded on purpose: it is
-reflexive, trivially manipulated, and has no stable relationship to next-session
-returns.
+the agent accumulates history. Community evidence is excluded from the index
+sentiment composite. A symbol read needs at least two independently configured accounts,
+starts at a low 0.30 reliability prior, and is capped at a small probability
+nudge. Popularity and follower counts carry no predictive weight. See
+[`docs/SOCIAL_RESEARCH.md`](docs/SOCIAL_RESEARCH.md).
 
 ---
 
@@ -281,6 +283,9 @@ returns.
   decision. Only 13D/G and Form 4 filings are timely.
 - **Option premium levels are model estimates.** Verify against the live chain;
   expect a worse fill than the model shows.
+- **Three calls plus three puts are screening slots, not a quota of trades.**
+  Only rows labelled `QUALIFIED` survived both gates. Empty, weak, and rejected
+  rows remain visible as `DATA UNAVAILABLE`, `WATCH ONLY`, or `REJECTED`.
 - **No execution.** This agent researches and writes. It does not place orders,
   and adding that is not a small change — it is a different risk category.
 

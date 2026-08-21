@@ -68,6 +68,17 @@ MARKETSWARM_CONTACT=you@example.com
 #MARKETSWARM_DISCORD_CHANNEL_ID=
 #MARKETSWARM_DISCORD_ALLOWED_USERS=
 
+# Optional: community research from channels this bot is permitted to read.
+# A private intake channel can receive annotated TradingView alerts/links and
+# manually forwarded X links. No TradingView scraping or Discord self-bot.
+#MARKETSWARM_SOCIAL_DISCORD_CHANNEL_IDS=
+#MARKETSWARM_COMMUNITY_LOOKBACK_HOURS=24
+#MARKETSWARM_COMMUNITY_MIN_SOURCES=2
+
+# Optional: allowlisted X accounts through the official X API.
+#MARKETSWARM_X_HANDLES=handle1,handle2
+#X_BEARER_TOKEN=
+
 # Schedule (Eastern Time). The daemon handles DST itself.
 MARKETSWARM_RUN_TIME=08:15
 

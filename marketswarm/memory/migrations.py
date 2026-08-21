@@ -489,7 +489,16 @@ ALTER TABLE run_control_path ADD COLUMN contextual_weights_used INTEGER DEFAULT 
 """)
 
 
-MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005, M006]
+# 007 — retain the option presentation fields used by the read-only six-slot
+# board. The recommendation columns remain authoritative for every decision;
+# this JSON carries only strike/expiry/premium display data and rejected-screen
+# audit context, just like Recommendation.source_payload in memory.
+M007 = Migration(7, "option_screen_payload", """
+ALTER TABLE recommendations ADD COLUMN presentation_payload TEXT;
+""")
+
+
+MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005, M006, M007]
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
 
 

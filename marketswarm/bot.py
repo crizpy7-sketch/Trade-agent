@@ -168,6 +168,7 @@ class DiscordBot:
             "status": self.cmd_status,
             "today": self.cmd_today,
             "report": self.cmd_today,
+            "plays": self.cmd_plays,
             "ticker": self.cmd_ticker,
             "look": self.cmd_ticker,
             "why": self.cmd_why,
@@ -184,6 +185,7 @@ class DiscordBot:
             "**MarketSwarm**\n"
             "`!status` — is the swarm healthy, when did it last run\n"
             "`!today` — what it found this morning, and what it rejected\n"
+            "`!plays` — three call and three put screening slots, each safety-labelled\n"
             "`!ticker SYM` — live quote plus what the swarm said about it today\n"
             "`!why SYM` — why that symbol was rejected today\n"
             "`!calibration` — the track record so far\n"
@@ -251,6 +253,36 @@ class DiscordBot:
                     out.append(f"```{str(findings)[:700]}```")
                 return "\n".join(out)
         return f"{symbol} was not rejected today. Try `!today`."
+
+    async def cmd_plays(self, args: list[str]) -> str:
+        run_date = args[0] if args else None
+        with self._api() as api:
+            board = api.screened_options(run_date=run_date, slots=3)
+        dated = next((r.get("run_date") for rows in board.values()
+                      for r in rows if r.get("run_date")), None)
+        out = [f"**Six-candidate screen{f' · {dated}' if dated else ''}**",
+               "Only **QUALIFIED** cleared both gates. Every other row is watch/audit context."]
+        for label, key in (("Calls", "calls"), ("Puts", "puts")):
+            out.append(f"\n__{label}__")
+            for n, row in enumerate(board[key], 1):
+                status = row.get("screen_status", "WITHHELD")
+                symbol = row.get("subject")
+                if not symbol:
+                    out.append(f"{n}. **{status}** — {row.get('screen_reason', '')}")
+                    continue
+                strike = f" {float(row['strike']):g}" if row.get("strike") else ""
+                expiry = f" exp {row['expiration']}" if row.get("expiration") else ""
+                metrics = []
+                if row.get("probability") is not None:
+                    metrics.append(f"P {float(row['probability']):.0%}")
+                if row.get("expected_r") is not None:
+                    metrics.append(f"EV {float(row['expected_r']):+.2f}R")
+                suffix = f" · {', '.join(metrics)}" if metrics else ""
+                reason = str(row.get("screen_reason") or "")
+                out.append(f"{n}. **{symbol}{strike}{expiry}** — **{status}**{suffix}"
+                           f"{f' · {reason[:70]}' if status != 'QUALIFIED' else ''}")
+        out.append("\n_Three slots per side does not mean six trades. Research only._")
+        return "\n".join(out)
 
     async def cmd_ticker(self, args: list[str]) -> str:
         """Live quote, plus whatever the swarm concluded about it today.
