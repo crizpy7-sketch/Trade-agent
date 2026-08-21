@@ -28,31 +28,10 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
 [[ -d "$APP_DIR" ]] || die "$APP_DIR not found — this is an update, run deploy/install.sh first"
 
-# --- 1. back up the database before anything else ------------------------
-# The learning history is the part that cannot be regenerated: re-running the
-# swarm gives you today's report back, but not months of resolved predictions.
-DB="$DATA_DIR/marketswarm.db"
-if [[ -f "$DB" ]]; then
-    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    BACKUP="$DATA_DIR/backups/marketswarm-$STAMP.db"
-    mkdir -p "$DATA_DIR/backups"
-    # sqlite3 .backup is safe against a live writer; cp is not. Fall back only
-    # if the sqlite3 binary is absent, and say so rather than pretending.
-    if command -v sqlite3 >/dev/null 2>&1; then
-        sqlite3 "$DB" ".backup '$BACKUP'"
-    else
-        warn "sqlite3 not installed — falling back to a plain copy, which is"
-        warn "only safe while nothing is writing. Stopping services first."
-        systemctl stop marketswarm marketswarm-bot 2>/dev/null || true
-        cp "$DB" "$BACKUP"
-    fi
-    chown -R "$APP_USER:$APP_USER" "$DATA_DIR/backups"
-    log "Database backed up to $BACKUP"
-else
-    log "No database yet — nothing to back up"
-fi
-
-# --- 2. which services are actually running ------------------------------
+# --- 1. which services are actually running ------------------------------
+# Recorded first, because the fallback backup path below stops them. Noted
+# afterwards, a stopped service looks like one that was never running and never
+# gets started again.
 WAS_RUNNING=()
 for unit in marketswarm marketswarm-bot; do
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
@@ -60,6 +39,48 @@ for unit in marketswarm marketswarm-bot; do
     fi
 done
 log "Running before update: ${WAS_RUNNING[*]:-none}"
+
+# --- 2. back up the database before anything else touches it -------------
+# The learning history is the part that cannot be regenerated: re-running the
+# swarm gives you today's report back, but not months of resolved predictions.
+#
+# Every *.db in the data directory is backed up rather than one name spelled out
+# here. A script that guesses the filename and misses prints a reassuring
+# "nothing to back up" while protecting nothing, which is worse than having no
+# backup step at all — that is not hypothetical, this script looked for
+# marketswarm.db for a while and the application writes memory.db.
+shopt -s nullglob
+DBS=("$DATA_DIR"/*.db)
+shopt -u nullglob
+
+if (( ${#DBS[@]} )); then
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p "$DATA_DIR/backups"
+    for DB in "${DBS[@]}"; do
+        BASE="$(basename "$DB" .db)"
+        BACKUP="$DATA_DIR/backups/$BASE-$STAMP.db"
+        # sqlite3 .backup is safe against a live writer; cp is not. Fall back
+        # only if the sqlite3 binary is absent, and say so rather than pretending.
+        if command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 "$DB" ".backup '$BACKUP'"
+        else
+            warn "sqlite3 not installed — falling back to a plain copy, which is"
+            warn "only safe while nothing is writing. Stopping services first."
+            systemctl stop marketswarm marketswarm-bot 2>/dev/null || true
+            cp "$DB" "$BACKUP"
+        fi
+        # A backup that silently produced nothing is not a backup. Refuse to go
+        # on rather than update with an imaginary safety net behind us.
+        [[ -s "$BACKUP" ]] || die "backup of $DB came out empty — stopping before the update"
+        log "Backed up $(basename "$DB") -> $BACKUP"
+    done
+    chown -R "$APP_USER:$APP_USER" "$DATA_DIR/backups"
+else
+    # Show what was actually searched, so "nothing to back up" is something the
+    # reader can check rather than has to trust.
+    log "No .db file in $DATA_DIR — nothing to back up. That directory holds:"
+    ls -A "$DATA_DIR" 2>/dev/null | sed 's/^/      /' | head -10 || log "      (nothing)"
+fi
 
 # --- 3. reinstall the code -----------------------------------------------
 # install.sh is idempotent and does the copy, the venv and the units. Reusing
