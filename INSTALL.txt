@@ -117,7 +117,7 @@ the statistical hurdle the result must clear. Understating it only fools you.
 
 Under systemd, prefix these with:
 
-    sudo -u marketswarm /opt/marketswarm/venv/bin/
+    sudo marketswarm-cli
 
 
 Optional integrations

@@ -85,13 +85,15 @@ systemctl daemon-reload
 systemctl enable marketswarm.service
 # The bot is installed but not enabled: it needs a token and an allowlist first,
 # and a service that starts only to refuse every command is noise.
-# One correct way to run the CLI by hand. Invoking the venv binary directly
-# misses both the data directory and the credentials file, and the result is a
-# confident report about the wrong environment rather than an error.
-install -m 755 "$REPO_DIR/deploy/marketswarm-cli" /usr/local/bin/marketswarm-cli
-RUN_CLI="sudo marketswarm-cli"
-
 log "Bot unit installed (not enabled — configure it, then: systemctl enable --now marketswarm-bot)"
+
+# One correct way to run the CLI by hand. See deploy/marketswarm-cli for why
+# invoking the venv binary directly reports on the wrong environment instead of
+# failing. The install target and the printed instructions share a name so they
+# cannot come apart.
+CLI_BIN="/usr/local/bin/marketswarm-cli"
+install -m 755 "$REPO_DIR/deploy/marketswarm-cli" "$CLI_BIN"
+RUN_CLI="sudo $(basename "$CLI_BIN")"
 
 cat <<EOF
 

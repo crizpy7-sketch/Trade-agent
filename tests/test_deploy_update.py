@@ -1,128 +1,187 @@
-"""The redeploy script's safety properties.
+"""The deploy scripts' safety properties.
 
-A backup step that looks for the wrong filename is worse than no backup step at
-all: it prints "nothing to back up" and the reader believes it. That is exactly
-what happened once — the script looked for ``marketswarm.db`` while the
-application writes ``memory.db`` — so what is checked here is the agreement
-between the script and the application, not the script on its own.
+Two incidents shaped what is checked here, and both were the same shape: a step
+that looked in the wrong place and reported confidently about it.
 
-These are text assertions over the shell source. They cannot prove the script
-runs correctly on a live host; they prove the two halves still agree about the
-things that go silently wrong when they drift apart.
+The backup step looked for ``marketswarm.db`` while the application writes
+``memory.db``, so it found nothing, printed "nothing to back up", and let the
+update proceed over an unprotected database. That one is covered by *running*
+deploy/backup-db.sh against a real directory — a test written to match the fixed
+text would have passed against the bug just as happily.
+
+``marketswarm status`` run by hand read a different data directory and a
+different credentials file than the daemon, so it described a healthy empty
+swarm sitting beside the real one. That one is covered by pinning the wrapper to
+the unit, which is a drift detector rather than a proof: it compares two files in
+the repo and cannot see the installed unit or a value overridden in
+/etc/marketswarm/env.
 """
 
 from __future__ import annotations
 
-import re
+import shutil
+import sqlite3
+import subprocess
+
+import pytest
+
 from pathlib import Path
 
 from marketswarm.config import Config
 
-SCRIPT = (Path(__file__).resolve().parent.parent / "deploy" / "update.sh").read_text()
-
-
-def test_the_backup_covers_the_database_the_application_actually_writes():
-    """The one that was wrong. config.py names the file; the script must find it."""
-    name = Config().db_path.name
-    assert name.endswith(".db"), \
-        f"the app writes {name!r}, which the *.db backup glob would not match"
-    assert '"$DATA_DIR"/*.db' in SCRIPT, \
-        "update.sh no longer globs for databases — it will miss a renamed one"
-
-
-def test_no_database_filename_is_hard_coded():
-    """A name repeated by hand drifts from config.py, and the drift is silent."""
-    hardcoded = re.findall(r'DATA_DIR[/"]*/?([A-Za-z0-9_-]+\.db)', SCRIPT)
-    assert not hardcoded, f"hard-coded database name(s) in update.sh: {hardcoded}"
-
-
-def test_a_backup_that_produced_nothing_stops_the_update():
-    """An empty backup file is not a backup. Better to refuse than to proceed."""
-    assert '-s "$BACKUP"' in SCRIPT, \
-        "update.sh does not verify the backup is non-empty before continuing"
-
-
-def test_running_services_are_recorded_before_anything_can_stop_them():
-    """The fallback path stops services. Recorded after, they never come back."""
-    assert "WAS_RUNNING=(" in SCRIPT
-    assert SCRIPT.index("WAS_RUNNING=(") < SCRIPT.index("systemctl stop"), \
-        "services are stopped before the script notes which ones to restart"
-
-
-def test_the_no_database_message_shows_what_it_looked_at():
-    """'Nothing to back up' must be checkable, not taken on trust."""
-    # Anchored on the log call, not the phrase — the phrase also appears in
-    # the comment explaining why this branch has to be self-evidencing.
-    idx = SCRIPT.index('log "No .db file in')
-    assert 'ls -A "$DATA_DIR"' in SCRIPT[idx:idx + 400], \
-        "the empty case does not show the directory it searched"
-
-
-# ------------------------------------------------- what the scripts print
-
-INSTALL = (Path(__file__).resolve().parent.parent / "deploy" / "install.sh").read_text()
-
-
-def test_the_scripts_never_invoke_the_venv_binary_directly():
-    """Every hand-run route must go through the wrapper.
-
-    The venv binary on its own misses the data directory (reading an empty
-    ~/.marketswarm beside the real one) and the credentials file (a configured
-    webhook reporting as "not set"). Both answer confidently about the wrong
-    environment. The wrapper is the only place that path may appear.
-    """
-    docs = (Path(__file__).resolve().parent.parent / "INSTALL.txt").read_text()
-    for script, name in ((INSTALL, "install.sh"), (SCRIPT, "update.sh"),
-                         (docs, "INSTALL.txt")):
-        offenders = [ln.strip() for ln in script.splitlines()
-                     if "venv/bin/marketswarm" in ln and not ln.strip().startswith("#")]
-        assert not offenders, \
-            f"{name} runs the CLI without the wrapper: {offenders}"
-
-
-def test_the_cli_prefix_is_defined_once_per_script():
-    """Spelled out at each use, one copy gets fixed and the others do not."""
-    for script, name in ((INSTALL, "install.sh"), (SCRIPT, "update.sh")):
-        defs = [ln for ln in script.splitlines() if ln.startswith("RUN_CLI=")]
-        assert len(defs) == 1, f"{name} defines RUN_CLI {len(defs)} times"
-
-
-# ------------------------------------------------------- the CLI wrapper
-
-DEPLOY = Path(__file__).resolve().parent.parent / "deploy"
+ROOT = Path(__file__).resolve().parents[1]
+DEPLOY = ROOT / "deploy"
+BACKUP_SH = DEPLOY / "backup-db.sh"
+UPDATE = (DEPLOY / "update.sh").read_text()
+INSTALL = (DEPLOY / "install.sh").read_text()
 WRAPPER = (DEPLOY / "marketswarm-cli").read_text()
 UNIT = (DEPLOY / "marketswarm.service").read_text()
+DOCS = (ROOT / "INSTALL.txt").read_text()
 
 
-def _unit_env(name: str) -> str:
-    for line in UNIT.splitlines():
-        if line.startswith(f"Environment={name}="):
-            return line.split("=", 2)[2]
-    raise AssertionError(f"{name} is not set in marketswarm.service")
+def run_backup(data_dir: Path, *, sqlite3_available: bool = True):
+    """Run the real backup script against a real directory."""
+    env = {"PATH": "/usr/bin:/bin" if sqlite3_available else str(data_dir / "empty-path")}
+    return subprocess.run(
+        ["bash", str(BACKUP_SH), str(data_dir)],
+        capture_output=True, text=True, env=env,
+    )
 
 
-def test_the_wrapper_uses_the_same_directories_as_the_service():
-    """The whole point of the wrapper is to be the service's environment.
+def make_db(path: Path) -> Path:
+    conn = sqlite3.connect(path)
+    conn.execute("create table predictions (id integer primary key, symbol text)")
+    conn.execute("insert into predictions (symbol) values ('NVDA')")
+    conn.commit()
+    conn.close()
+    return path
 
-    If these drift, a hand-run check reports on a different directory than the
-    daemon writes to — and reports it confidently.
+
+# ------------------------------------------------------- backing up, for real
+
+def test_the_database_the_application_writes_is_the_one_backed_up(tmp_path):
+    """The original bug, reproduced end to end.
+
+    The name comes from marketswarm.config, so this fails if the script ever
+    goes back to looking for a filename spelled out by hand.
     """
-    for var in ("MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"):
-        assert f"{var}={_unit_env(var)}\n" in WRAPPER, \
-            f"{var} in marketswarm-cli does not match marketswarm.service"
+    make_db(tmp_path / Config().db_path.name)
+
+    result = run_backup(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    backups = list((tmp_path / "backups").glob("*.db"))
+    assert len(backups) == 1, f"expected one backup, got {backups}"
+    assert backups[0].stat().st_size > 0
+    assert "nothing to back up" not in result.stdout
+
+
+def test_a_backup_is_a_readable_copy_not_just_a_file_of_the_right_size(tmp_path):
+    make_db(tmp_path / Config().db_path.name)
+    run_backup(tmp_path)
+
+    backup = next((tmp_path / "backups").glob("*.db"))
+    conn = sqlite3.connect(backup)
+    assert conn.execute("select symbol from predictions").fetchall() == [("NVDA",)]
+    conn.close()
+
+
+def test_every_database_is_backed_up_not_only_the_first(tmp_path):
+    """A rename or a second store must not fall out of the backup silently."""
+    make_db(tmp_path / Config().db_path.name)
+    make_db(tmp_path / "experiments.db")
+
+    run_backup(tmp_path)
+
+    assert len(list((tmp_path / "backups").glob("*.db"))) == 2
+
+
+def test_an_empty_directory_reports_what_it_actually_looked_at(tmp_path):
+    """'Nothing to back up' has to be checkable, not taken on trust."""
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "cache").mkdir()
+
+    result = run_backup(tmp_path)
+
+    assert result.returncode == 0
+    assert "nothing to back up" in result.stdout
+    # The directory listing is the evidence for the claim.
+    assert "reports" in result.stdout and "cache" in result.stdout
+
+
+def test_a_missing_data_directory_is_an_error_not_a_quiet_success(tmp_path):
+    result = run_backup(tmp_path / "does-not-exist")
+    assert result.returncode != 0
+    assert "does not exist" in result.stderr
+
+
+def test_an_empty_backup_aborts_rather_than_reporting_success(tmp_path):
+    """The safety net has to fail loudly, or it is not a safety net.
+
+    An empty source file stands in for any way the copy can come out empty; the
+    script must refuse rather than let an update proceed behind it.
+    """
+    (tmp_path / Config().db_path.name).touch()
+
+    result = run_backup(tmp_path)
+
+    assert result.returncode != 0
+    assert "empty" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("sqlite3") is not None,
+                    reason="sqlite3 present, so the fallback path is not taken")
+def test_without_sqlite3_the_copy_fallback_still_produces_a_usable_backup(tmp_path):
+    """The fallback is the path this host actually takes — it has to work."""
+    make_db(tmp_path / Config().db_path.name)
+
+    result = run_backup(tmp_path)
+
+    assert result.returncode == 0
+    assert "sqlite3 not installed" in result.stdout + result.stderr
+    backup = next((tmp_path / "backups").glob("*.db"))
+    conn = sqlite3.connect(backup)
+    assert conn.execute("select symbol from predictions").fetchall() == [("NVDA",)]
+    conn.close()
+
+
+# ------------------------------------------------ the wrapper against the unit
+
+def _unit_field(prefix: str) -> str:
+    for line in UNIT.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    raise AssertionError(f"no {prefix!r} line in marketswarm.service")
+
+
+@pytest.mark.parametrize("var", ["MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"])
+def test_the_wrapper_uses_the_same_directories_as_the_service(var):
+    """Drift here means a hand-run check reads a directory the daemon does not."""
+    value = _unit_field(f"Environment={var}=")
+    assert f"export {var}={value}\n" in WRAPPER, \
+        f"{var} in marketswarm-cli does not match marketswarm.service"
 
 
 def test_the_wrapper_runs_as_the_same_user_and_binary_as_the_service():
-    user = next(l.split("=", 1)[1] for l in UNIT.splitlines() if l.startswith("User="))
-    exec_start = next(l for l in UNIT.splitlines() if l.startswith("ExecStart="))
-    binary = exec_start.split("=", 1)[1].split()[0]
+    user = _unit_field("User=")
+    binary = _unit_field("ExecStart=").split()[0]
     assert f"-u {user} {binary}" in WRAPPER, \
         "marketswarm-cli runs a different user or binary than the service does"
 
 
-def test_the_wrapper_loads_the_credentials_file():
-    """Without it, a configured webhook reports as 'not set'."""
-    assert ". /etc/marketswarm/env" in WRAPPER
+def test_the_credentials_file_can_override_the_wrapper_defaults():
+    """Precedence has to match the unit, which sets Environment= before
+    EnvironmentFile= and so lets /etc/marketswarm/env win.
+
+    Reversed, relocating the data directory would move the daemon and leave the
+    wrapper reporting on the abandoned one — the bug the wrapper exists to stop,
+    rebuilt inside it.
+    """
+    defaults = WRAPPER.index("export MARKETSWARM_DATA_DIR=")
+    sourced = WRAPPER.index(". /etc/marketswarm/env")
+    assert defaults < sourced, \
+        "marketswarm-cli overwrites the credentials file's values instead of " \
+        "defaulting beneath them"
 
 
 def test_the_wrapper_keeps_secrets_out_of_the_process_list():
@@ -135,5 +194,33 @@ def test_the_wrapper_keeps_secrets_out_of_the_process_list():
         assert bad not in WRAPPER, f"marketswarm-cli exposes secrets via {bad!r}"
 
 
+# --------------------------------------------- what the scripts and docs print
+
+def test_nothing_tells_the_operator_to_run_the_venv_binary_directly():
+    """Every hand-run route must go through the wrapper.
+
+    The check is for the directory, not the full binary path: INSTALL.txt had a
+    line ending at ``venv/bin/`` with the command name on the line above, and a
+    narrower pattern walked straight past it.
+    """
+    for text, name in ((INSTALL, "install.sh"), (UPDATE, "update.sh"),
+                       (DOCS, "INSTALL.txt")):
+        offenders = [ln.strip() for ln in text.splitlines()
+                     if "/opt/marketswarm/venv/bin" in ln
+                     and not ln.strip().startswith("#")]
+        assert not offenders, f"{name} bypasses the wrapper: {offenders}"
+
+
 def test_the_installer_installs_the_wrapper():
     assert "marketswarm-cli" in INSTALL, "install.sh never installs the wrapper"
+
+
+def test_the_update_delegates_the_backup_rather_than_repeating_it():
+    """Two copies of the backup logic is how one of them gets fixed."""
+    assert "backup-db.sh" in UPDATE
+    assert "sqlite3" not in UPDATE, "update.sh has its own copy of the backup"
+
+
+def test_services_are_recorded_before_anything_can_stop_them():
+    """The plain-copy fallback stops them. Recorded after, they never restart."""
+    assert UPDATE.index("WAS_RUNNING=(") < UPDATE.index("backup-db.sh")

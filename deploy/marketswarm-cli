@@ -3,19 +3,18 @@
 # Run MarketSwarm's CLI exactly as the service runs it.
 #
 # Two things separate a hand-run CLI from the daemon, and both make `status`
-# mislead rather than fail:
+# mislead rather than fail: without MARKETSWARM_DATA_DIR the CLI reads its own
+# default of ~/.marketswarm — an empty directory beside the real one, so status
+# reports a healthy, empty swarm — and without /etc/marketswarm/env every
+# integration reads "not set", so a webhook that published this morning shows
+# as unconfigured. Both answer confidently about the wrong environment, which is
+# the worst way for a check to fail.
 #
-#   the data directory  The CLI's default is ~/.marketswarm, which for this
-#                       system user is an empty directory sitting beside the
-#                       real one. `status` then reports a healthy, empty swarm
-#                       while the live one is next to it, full of history.
-#
-#   the credentials     Without /etc/marketswarm/env, every integration reads
-#                       "not set" — a configured webhook looks unconfigured,
-#                       and the SEC contact shows its own placeholder text.
-#
-# Both of those are answers about the wrong environment, delivered with the
-# same confidence as a right one, which is the worst way for a check to fail.
+# Precedence here mirrors marketswarm.service, which sets Environment= before
+# EnvironmentFile=: the defaults below are set first so that a value in
+# /etc/marketswarm/env overrides them, exactly as it overrides the unit's. Set
+# the other way round, relocating the data directory would move the daemon and
+# leave this wrapper reporting on the old one.
 #
 # The env file is sourced into this shell rather than passed as arguments,
 # because /proc/<pid>/cmdline is world-readable and the environment is not.
@@ -28,13 +27,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Kept in step with deploy/marketswarm.service — a test fails if they drift.
+export MARKETSWARM_DATA_DIR=/var/lib/marketswarm
+export MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
+
 set -a
 [ -r /etc/marketswarm/env ] && . /etc/marketswarm/env
 set +a
-
-# Kept in step with deploy/marketswarm.service — a test fails if they drift.
-MARKETSWARM_DATA_DIR=/var/lib/marketswarm
-MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
-export MARKETSWARM_DATA_DIR MARKETSWARM_REPORT_DIR
 
 exec sudo -E -u marketswarm /opt/marketswarm/venv/bin/marketswarm "$@"
