@@ -26,6 +26,11 @@ DEFAULT_UNIVERSE = [
 
 DEFAULT_INDEX_SYMBOLS = ["SPY", "QQQ", "IWM"]
 
+SECRET_CONFIG_KEYS = {
+    "fred_api_key", "anthropic_api_key", "webhook_url",
+    "discord_bot_token", "x_bearer_token",
+}
+
 
 @dataclass
 class Config:
@@ -68,6 +73,17 @@ class Config:
     contact_email: str = "set MARKETSWARM_CONTACT"
     webhook_url: str | None = None
     notify_on: str = "always"          # always | high_confidence | never
+
+    # Permissioned community research. Secrets stay environment-only; the
+    # allowlists may also be supplied in YAML. TradingView community content is
+    # accepted only after it arrives through an authorised Discord intake
+    # channel (alert webhook or manual forward) — it is never scraped.
+    discord_bot_token: str | None = None
+    community_discord_channel_ids: list[str] = field(default_factory=list)
+    x_bearer_token: str | None = None
+    x_handles: list[str] = field(default_factory=list)
+    community_lookback_hours: int = 24
+    community_min_sources: int = 2
 
     # --- injected at runtime, not persisted ---
     calibrator: Any = None
@@ -119,6 +135,9 @@ class Config:
             log.warning("could not read config %s: %s — using defaults", path, exc)
             return
         for key, val in raw.items():
+            if key in SECRET_CONFIG_KEYS:
+                log.warning("secret config key %r ignored; set it in the environment", key)
+                continue
             if not hasattr(self, key):
                 log.warning("unknown config key %r ignored", key)
                 continue
@@ -134,10 +153,14 @@ class Config:
             "MARKETSWARM_MODEL": ("llm_model", str),
             "MARKETSWARM_CONTACT": ("contact_email", str),
             "MARKETSWARM_WEBHOOK": ("webhook_url", str),
+            "MARKETSWARM_DISCORD_BOT_TOKEN": ("discord_bot_token", str),
+            "X_BEARER_TOKEN": ("x_bearer_token", str),
             "MARKETSWARM_DATA_DIR": ("data_dir", lambda v: Path(v).expanduser()),
             "MARKETSWARM_REPORT_DIR": ("report_dir", lambda v: Path(v).expanduser()),
             "MARKETSWARM_RUN_TIME": ("run_time_et", str),
             "MARKETSWARM_BASE_RISK": ("base_risk_pct", float),
+            "MARKETSWARM_COMMUNITY_LOOKBACK_HOURS": ("community_lookback_hours", int),
+            "MARKETSWARM_COMMUNITY_MIN_SOURCES": ("community_min_sources", int),
             "MARKETSWARM_LLM_ENABLED": ("llm_enabled", lambda v: v.lower() not in ("0", "false", "no")),
         }
         for env, (attr, cast) in env_map.items():
@@ -151,6 +174,18 @@ class Config:
         universe = os.environ.get("MARKETSWARM_UNIVERSE")
         if universe:
             self.universe = [s.strip().upper() for s in universe.split(",") if s.strip()]
+
+        social_channels = os.environ.get("MARKETSWARM_SOCIAL_DISCORD_CHANNEL_IDS")
+        if social_channels:
+            self.community_discord_channel_ids = _split_env_list(social_channels)
+
+        x_handles = os.environ.get("MARKETSWARM_X_HANDLES")
+        if x_handles:
+            self.x_handles = [h.lstrip("@").lower() for h in _split_env_list(x_handles)]
+
+        # Bound operator input before it controls query volume or consensus.
+        self.community_lookback_hours = max(1, min(self.community_lookback_hours, 168))
+        self.community_min_sources = max(2, min(self.community_min_sources, 10))
 
     def to_yaml(self) -> str:
         import yaml
@@ -169,7 +204,17 @@ class Config:
             "llm_enabled": self.llm_enabled,
             "contact_email": self.contact_email,
             "notify_on": self.notify_on,
+            "community_discord_channel_ids": self.community_discord_channel_ids,
+            "x_handles": self.x_handles,
+            "community_lookback_hours": self.community_lookback_hours,
+            "community_min_sources": self.community_min_sources,
             "data_dir": str(self.data_dir),
             "report_dir": str(self.report_dir),
         }
         return yaml.safe_dump(payload, sort_keys=False)
+
+
+def _split_env_list(value: str) -> list[str]:
+    """Comma/space separated environment list, de-duplicated in order."""
+    parts = [p.strip() for p in value.replace(",", " ").split() if p.strip()]
+    return list(dict.fromkeys(parts))

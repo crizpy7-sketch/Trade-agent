@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from ..providers.community import CommunityData, aggregate_symbol_reads
 from .base import AgentReport, BaseAgent, SwarmContext
 
 
@@ -138,7 +139,7 @@ class InstitutionalAgent(BaseAgent):
 
 class SentimentAgent(BaseAgent):
     name = "sentiment"
-    description = "Positioning and mood from measurable proxies only"
+    description = "Measured positioning plus permissioned, low-weight community research"
     depends_on = ("volatility_regime", "options_flow", "breaking_news")
 
     async def run(self, ctx: SwarmContext) -> AgentReport:
@@ -150,6 +151,75 @@ class SentimentAgent(BaseAgent):
         flows = ctx.data_of("options_flow", "flows", {}) or {}
         breadth = ctx.data_of("overnight_scan", "breadth_pct_up")
         news_high = ctx.data_of("breaking_news", "high_materiality", []) or []
+
+        # Social material is evidence, not authority. TradingView reaches this
+        # path only through a permitted Discord intake channel; X is queried
+        # only for explicitly allowlisted handles through the official API.
+        community_posts = []
+        community_configured = bool(
+            (ctx.config.community_discord_channel_ids and ctx.config.discord_bot_token)
+            or (ctx.config.x_handles and ctx.config.x_bearer_token)
+        )
+        if community_configured:
+            community = CommunityData(
+                ctx.market.client,
+                ctx.universe,
+                lookback_hours=ctx.config.community_lookback_hours,
+            )
+            batches = await ctx.market.client.gather([
+                community.discord(
+                    ctx.config.community_discord_channel_ids,
+                    ctx.config.discord_bot_token or "",
+                ),
+                community.x(ctx.config.x_handles, ctx.config.x_bearer_token or ""),
+            ], label="community")
+            community_posts = [post for batch in batches if batch for post in batch]
+
+        symbol_reads = aggregate_symbol_reads(
+            community_posts,
+            min_sources=ctx.config.community_min_sources,
+        )
+        qualifying_reads = [r for r in symbol_reads.values() if r["qualifies"]]
+        platform_counts: dict[str, int] = {}
+        for post in community_posts:
+            platform_counts[post.platform] = platform_counts.get(post.platform, 0) + 1
+            rep.cite(
+                f"{post.author} expressed an explicit {post.direction or 'non-directional'} "
+                f"view on {', '.join(post.symbols)}",
+                source="social_sentiment",
+                url=post.url,
+                reliability=0.30,
+                value={
+                    "platform": post.platform,
+                    "author": post.author,
+                    "direction": post.direction,
+                    "engagement": post.engagement,
+                },
+                tags=["social", *post.symbols],
+            )
+
+        if community_configured:
+            independent_accounts = len({p.source_key for p in community_posts})
+            rep.add(
+                f"Permissioned community intake: {len(community_posts)} relevant post(s) "
+                f"from {independent_accounts} "
+                f"independent account(s); {len(qualifying_reads)} symbol read(s) met the "
+                f"{ctx.config.community_min_sources}-source corroboration rule"
+            )
+            for read in sorted(qualifying_reads,
+                               key=lambda r: (-r["independent_sources"], r["symbol"]))[:8]:
+                rep.add(
+                    f"{read['symbol']} community {read['direction']}: "
+                    f"{read['long_sources']} long / {read['short_sources']} short "
+                    f"across {read['independent_sources']} independent sources"
+                )
+                rep.signal(
+                    f"community:{read['symbol']}",
+                    read["probability_up"],
+                    weight=0.25 * ctx.weight_for(self.name),
+                    note=(f"permissioned community consensus: {read['long_sources']} long / "
+                          f"{read['short_sources']} short; cold-start social prior capped at 58/42"),
+                )
 
         components: dict[str, float] = {}   # each in [0,1], 1 = greedy/bullish
 
@@ -174,11 +244,31 @@ class SentimentAgent(BaseAgent):
             components["breadth"] = float(breadth)
             rep.add(f"Pre-market breadth {breadth:.0%} of watchlist green")
 
-        if not components:
+        if not components and not community_posts:
             rep.status = "degraded"
             rep.error = "no sentiment inputs available"
             rep.headline = "Sentiment: inputs unavailable"
             rep.confidence = 0.2
+            return rep
+
+        if not components:
+            rep.data = {
+                "score": None,
+                "label": "community evidence only",
+                "components": {},
+                "symbol_reads": symbol_reads,
+                "community_posts": len(community_posts),
+                "platform_counts": platform_counts,
+            }
+            rep.headline = (
+                f"Community research: {len(community_posts)} relevant post(s), "
+                f"{len(qualifying_reads)} corroborated symbol read(s)"
+            )
+            rep.confidence = 0.30
+            rep.add(
+                "Community evidence is never used alone to authorise a trade; without "
+                "measurable positioning inputs this report remains context only."
+            )
             return rep
 
         score = sum(components.values()) / len(components)
@@ -189,13 +279,21 @@ class SentimentAgent(BaseAgent):
         rep.cite(f"Composite sentiment {score:.2f} ({label})", source="exchange_data",
                  reliability=0.65, value=components, tags=["sentiment"])
         rep.add(
-            "This composite deliberately excludes social-media sentiment: it is reflexive, "
-            "trivially manipulated, and has no stable relationship to next-session returns."
+            "Community posts are excluded from the index sentiment composite. Corroborated "
+            "symbol reads may only nudge a ticker probability at a capped low weight; "
+            "popularity and follower counts do not count as predictive evidence."
         )
         if news_high:
             rep.add(f"{len(news_high)} high-materiality headlines are shaping the mood into the open")
 
-        rep.data = {"score": score, "label": label, "components": components}
+        rep.data = {
+            "score": score,
+            "label": label,
+            "components": components,
+            "symbol_reads": symbol_reads,
+            "community_posts": len(community_posts),
+            "platform_counts": platform_counts,
+        }
         rep.headline = f"Sentiment {label} ({score:.2f})"
         rep.confidence = 0.55 + 0.05 * len(components)
 

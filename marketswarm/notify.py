@@ -33,22 +33,40 @@ def summarize(result) -> str:
     pub = getattr(result, "publication", None)
     if pub is not None and pub.suppressed:
         lines.append(f"\n__No recommendations published__\n{pub.suppression_reason}")
-        lines.append("\n_Research/educational analysis only — not financial advice._")
-        text = "\n".join(lines)
-        return text[:MAX_LEN] + ("…" if len(text) > MAX_LEN else "")
 
-    # Reads the derived view, so a rejected candidate cannot be notified.
-    for label, key in (("Calls", "calls"), ("Puts", "puts"), ("Stocks", "stocks")):
-        ideas = (result.ideas or {}).get(key, [])
-        if not ideas:
-            continue
+    # Always show three slots on each side. A fixed board is not a fixed number
+    # of recommendations: every row carries QUALIFIED, WATCH ONLY, REJECTED,
+    # WITHHELD, or DATA UNAVAILABLE, and only QUALIFIED rows enter tracking.
+    screened = result.screened_ideas
+    for label, key in (("3 Call candidates", "calls"),
+                       ("3 Put candidates", "puts")):
         lines.append(f"\n__{label}__")
-        for i in ideas:
-            strike = f" {i['strike']:g}" if i.get("strike") else ""
+        for n, row in enumerate(screened.get(key, []), 1):
+            status = row.get("screen_status", "WITHHELD")
+            symbol = row.get("symbol")
+            if not symbol:
+                lines.append(f"{n}. **{status}** — {row.get('screen_reason', '')[:95]}")
+                continue
+            strike = f" {row['strike']:g}" if row.get("strike") else ""
+            metrics = []
+            if row.get("probability") is not None:
+                metrics.append(f"P {float(row['probability']):.0%}")
+            if row.get("expected_r") is not None:
+                metrics.append(f"EV {float(row['expected_r']):+.2f}R")
+            suffix = f" · {', '.join(metrics)}" if metrics else ""
+            lines.append(f"{n}. {symbol}{strike} — **{status}**{suffix}")
+
+    # Preserve the separately screened stock ideas. The fixed six-slot board
+    # applies only to options; omitting stocks here would silently remove an
+    # existing downstream view for otherwise publishable recommendations.
+    stocks = (result.ideas or {}).get("stocks", [])
+    if stocks:
+        lines.append("\n__Stocks__")
+        for idea in stocks:
             lines.append(
-                f"• {i['symbol']}{strike} {i['direction']} — entry {i['entry']:.2f}, "
-                f"target {i['target']:.2f}, stop {i['stop']:.2f} "
-                f"(P {i['probability']:.0%}, EV {i['expected_r']:+.2f}R)"
+                f"• {idea['symbol']} {idea['direction']} — entry {idea['entry']:.2f}, "
+                f"target {idea['target']:.2f}, stop {idea['stop']:.2f} "
+                f"(P {idea['probability']:.0%}, EV {idea['expected_r']:+.2f}R)"
             )
     lines.append("\n_Research/educational analysis only — not financial advice._")
     text = "\n".join(lines)

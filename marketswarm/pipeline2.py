@@ -19,6 +19,7 @@ upgrade must not make the system more fragile than the version it replaces.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import logging
 import uuid
@@ -76,13 +77,19 @@ class CandidateReview:
     """
 
     def __init__(self, pipeline: "Pipeline2", reports: dict, symbol: str,
-                 graph: EvidenceGraph, plan, investigator=None):
+                 graph: EvidenceGraph, plan, investigator=None,
+                 initial_red_team=None):
         self.pipeline = pipeline
         self.reports = reports
         self.symbol = symbol
         self.graph = graph
         self.plan = plan
         self.investigator = investigator
+        # All candidates in one batch must receive the same opening review.
+        # A follow-up for candidate A mutates the live report dict; without an
+        # opening snapshot, candidate B would silently skip the objections
+        # that A saw merely because it happened to be reviewed second.
+        self.initial_red_team = initial_red_team
 
         self.graph_version = 1
         self.dirty = False                      # new reports since the last graph build
@@ -131,7 +138,9 @@ class CandidateReview:
         if self.dirty:
             self.refresh_evidence()
 
-        rt = self.reports.get("red_team")
+        rt = (self.initial_red_team if iteration == 0
+              and self.initial_red_team is not None
+              else self.reports.get("red_team"))
         status = redteam_execution_status(rt)
 
         if status.is_trustworthy:
@@ -240,6 +249,7 @@ SOURCE_HALF_LIVES: dict[str, float] = {
     "exchange_data": 2.0,
     "federal_reserve": 168.0,
     "treasury": 168.0,
+    "social_sentiment": 2.0,
 }
 
 
@@ -459,6 +469,7 @@ class Pipeline2:
         sessions: list[CandidateReview] = []
         review_incomplete = False
         plan_by_subject = {p.subject: p for p in (plans or [])}
+        initial_red_team = copy.deepcopy(reports.get("red_team"))
 
         for kind, idea in ideas:
             symbol = idea.get("symbol", "?")
@@ -470,7 +481,8 @@ class Pipeline2:
             # against what round 1 bought rather than against a cached report.
             session = CandidateReview(
                 self, reports, symbol, graph,
-                plan_by_subject.get(symbol), investigator)
+                plan_by_subject.get(symbol), investigator,
+                initial_red_team=initial_red_team)
             session.candidate_id = candidate_id
             sessions.append(session)
 
@@ -494,6 +506,8 @@ class Pipeline2:
                     status=(RecordStatus.SUPPRESSED if incomplete
                             else RecordStatus.REJECTED),
                     review_rounds=list(session.rounds),
+                    source_kind=kind,
+                    source_payload=dict(idea),
                 ))
                 self.obs.event("review", f"{symbol} "
                                          f"{'suppressed' if incomplete else 'rejected'}: "

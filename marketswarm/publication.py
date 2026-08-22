@@ -67,6 +67,8 @@ class RejectedCandidate:
     # Every adversarial round this candidate went through, oldest first.
     # Round 1 is never overwritten by round 2 — after-action review needs both.
     review_rounds: list[dict] = field(default_factory=list)
+    source_kind: str | None = None
+    source_payload: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +79,8 @@ class RejectedCandidate:
             "original_confidence": self.original_confidence,
             "status": self.status.value,
             "review_rounds": list(self.review_rounds),
+            "source_kind": self.source_kind,
+            "source_payload": dict(self.source_payload),
             "audit": self.audit,
         }
 
@@ -174,6 +178,75 @@ class PublicationSet:
                 continue
             view[bucket].append(_payload_from(rec))
         return view
+
+    def screening_view(self, playbook_data: dict | None, slots: int = 3) -> dict:
+        """Exactly ``slots`` call and put rows, each carrying a safety status.
+
+        This is an audit/watch surface, not the active recommendation surface.
+        Rejected candidates may be displayed here only with an unmistakable
+        ``REJECTED`` label; they never enter :meth:`ideas_view`, predictions,
+        monitoring, or scoring. A failed review layer yields withheld
+        placeholders instead of leaking unreviewed candidates.
+        """
+        slots = max(1, min(int(slots), 10))
+        out: dict[str, list[dict]] = {"calls": [], "puts": []}
+        if self.suppressed:
+            reason = self.suppression_reason or "publication suppressed"
+            for key, kind in (("calls", "call"), ("puts", "put")):
+                out[key] = [_empty_screen_slot(kind, "WITHHELD", reason, n + 1)
+                            for n in range(slots)]
+            return out
+
+        active = {(r.subject, r.source_kind): r for r in self.active()
+                  if r.source_kind in ("call", "put")}
+        rejected = {(r.subject, r.source_kind): r for r in self.rejected
+                    if r.source_kind in ("call", "put")}
+        playbook_data = playbook_data or {}
+
+        for key, kind in (("calls", "call"), ("puts", "put")):
+            rows: list[dict] = []
+            for candidate in (playbook_data.get(key, []) or [])[:slots]:
+                symbol = str(candidate.get("symbol") or "?")
+                rec = active.get((symbol, kind))
+                rej = rejected.get((symbol, kind))
+                if rec is not None:
+                    row = _payload_from(rec)
+                    row["candidate_direction"] = "long" if kind == "call" else "short"
+                    if rec.actionable:
+                        row["screen_status"] = "QUALIFIED"
+                        row["screen_reason"] = "cleared the recommendation and review gates"
+                    else:
+                        row["screen_status"] = "WATCH ONLY"
+                        notes = rec.uncertainty_notes or [rec.rec_type.value]
+                        row["screen_reason"] = "; ".join(str(n) for n in notes[:2])
+                elif rej is not None:
+                    # These numbers describe what was screened, not what was
+                    # approved. The status is part of the row by construction.
+                    row = dict(candidate)
+                    row.update({
+                        "candidate_direction": "long" if kind == "call" else "short",
+                        "screen_status": "REJECTED",
+                        "screen_reason": rej.reason,
+                        "candidate_id": rej.candidate_id,
+                    })
+                else:
+                    row = dict(candidate)
+                    row.update({
+                        "candidate_direction": "long" if kind == "call" else "short",
+                        "screen_status": "WITHHELD",
+                        "screen_reason": "candidate did not complete the review path",
+                    })
+                rows.append(row)
+
+            while len(rows) < slots:
+                rows.append(_empty_screen_slot(
+                    kind,
+                    "DATA UNAVAILABLE",
+                    "no valid liquid contract and sane bracket were available for this slot",
+                    len(rows) + 1,
+                ))
+            out[key] = rows
+        return out
 
     # ---------- the invariant ----------
 
@@ -277,3 +350,14 @@ def _payload_from(rec: Recommendation) -> dict:
     if rec.supporting_evidence:
         payload["evidence"] = list(rec.supporting_evidence[:6])
     return payload
+
+
+def _empty_screen_slot(kind: str, status: str, reason: str, slot: int) -> dict:
+    return {
+        "symbol": None,
+        "kind": kind,
+        "slot": slot,
+        "candidate_direction": "long" if kind == "call" else "short",
+        "screen_status": status,
+        "screen_reason": reason,
+    }

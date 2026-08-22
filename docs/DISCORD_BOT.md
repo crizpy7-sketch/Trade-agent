@@ -20,6 +20,7 @@ do not interfere.
 ```
 !status         is the swarm healthy, when did it last run
 !today          what it found this morning, and what it rejected
+!plays          three call and three put slots, each safety-labelled
 !ticker NVDA    live quote plus what the swarm said about it today
 !why SPY        why that symbol was rejected today
 !calibration    the track record so far
@@ -30,6 +31,10 @@ do not interfere.
 `!ticker` labels its two halves separately on purpose. The quote is fetched at
 the moment you ask; the verdict is from the morning's run. A fresh price sitting
 next to a stale verdict reads as one coherent statement and is not one.
+
+`!plays` always has six rows, but it does **not** force six trades. A row is
+actionable only when it says `QUALIFIED`. `WATCH ONLY`, `REJECTED`, `WITHHELD`,
+and `DATA UNAVAILABLE` are explicit non-trade outcomes.
 
 ## What it cannot do
 

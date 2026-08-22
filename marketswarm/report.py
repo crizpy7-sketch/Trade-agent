@@ -155,6 +155,13 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
                    "observations into a position, and that part is missing on purpose "
                    "rather than by omission.")
         out.append("")
+        screened = result.screened_ideas
+        out.extend(_render_screened_option_block(
+            "## 1. Best Call Options — Three Screening Slots",
+            screened.get("calls", []), "call", demo))
+        out.extend(_render_screened_option_block(
+            "## 2. Best Put Options — Three Screening Slots",
+            screened.get("puts", []), "put", demo))
         out.extend(_render_review_summary(pub))
         out.extend(_render_supporting_sections(result))
         return "\n".join(out)
@@ -172,13 +179,17 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
         out.append(f"*{pb.headline}*")
         out.append("")
 
-    # Every idea below is derived from an approved recommendation. A candidate
-    # the review gate rejected has no path into this renderer.
+    # Six fixed screening slots, not six forced recommendations. Rejected and
+    # weak candidates are visible only with their status attached; the active
+    # ideas view remains approved-only and is still the sole input to tracking.
+    screened = result.screened_ideas
     ideas = result.ideas
-    out.extend(_render_idea_block("## 1. Best Call Options", ideas.get("calls", []),
-                                 "call", demo))
-    out.extend(_render_idea_block("## 2. Best Put Options", ideas.get("puts", []),
-                                  "put", demo))
+    out.extend(_render_screened_option_block(
+        "## 1. Best Call Options — Three Screening Slots",
+        screened.get("calls", []), "call", demo))
+    out.extend(_render_screened_option_block(
+        "## 2. Best Put Options — Three Screening Slots",
+        screened.get("puts", []), "put", demo))
     out.extend(_render_stock_block(ideas.get("stocks", []), demo))
     out.extend(_render_non_actionable(pub))
     out.extend(_render_review_summary(pub))
@@ -327,6 +338,67 @@ def _render_idea_block(title: str, ideas: list[dict], kind: str, demo: bool = Fa
             out.append("")
         out.append(f"**Invalidated if:** {i['invalidation']}")
         out.append("")
+    return out
+
+
+def _render_screened_option_block(title: str, rows: list[dict], kind: str,
+                                  demo: bool = False) -> list[str]:
+    """Render exactly three slots without turning symmetry into endorsement."""
+    out = [title, ""]
+    out.append(
+        "*QUALIFIED cleared both gates. WATCH ONLY, REJECTED, and WITHHELD are "
+        "research/audit context, not trade recommendations. DATA UNAVAILABLE is "
+        "intentionally left blank.*"
+    )
+    out.append("")
+    for n, row in enumerate(rows, 1):
+        status = str(row.get("screen_status") or "WITHHELD")
+        symbol = row.get("symbol")
+        if not symbol or status in {"REJECTED", "WITHHELD", "DATA UNAVAILABLE"}:
+            subject = f" {symbol}" if symbol else ""
+            strike = (f" {row['strike']:g}" if symbol and row.get("strike")
+                      else "")
+            out.append(f"**Slot {n} — {status}:{subject}{strike} {kind.upper()}**")
+            out.append("")
+            out.append(f"> **{status}.** {row.get('screen_reason', 'No candidate available.')}")
+            out.append("")
+            continue
+
+        tag = "SAMPLE / FAKE PRICE — " if demo else ""
+        strike = f" {row['strike']:g}" if row.get("strike") else ""
+        expiry = f" · exp {row['expiration']}" if row.get("expiration") else ""
+        out.append(f"### {n}. {tag}{symbol}{strike} {kind.upper()}{expiry}")
+        out.append("")
+        out.append(f"> **{status}.** {row.get('screen_reason', '')}")
+        out.append("")
+        out.append("| | |")
+        out.append("|---|---|")
+        if row.get("entry") is not None:
+            out.append(f"| Underlying entry | {float(row['entry']):.2f} |")
+        if row.get("target") is not None:
+            out.append(f"| Underlying target | {float(row['target']):.2f} |")
+        if row.get("stop") is not None:
+            out.append(f"| Underlying stop | {float(row['stop']):.2f} |")
+        if row.get("option_entry"):
+            out.append(f"| Premium entry zone | {row['option_entry']} |")
+            out.append(f"| Premium target | {row.get('option_target', 'unavailable')} |")
+            out.append(f"| Premium stop | {row.get('option_stop', 'unavailable')} |")
+        if row.get("probability") is not None:
+            out.append(f"| P(target before stop) | {float(row['probability']):.0%} |")
+        if row.get("expected_r") is not None:
+            out.append(f"| Expected value | {float(row['expected_r']):+.2f}R after costs |")
+        if row.get("confidence") is not None:
+            out.append(f"| Confidence | {int(row['confidence'])}/100 |")
+        out.append("")
+        if row.get("rationale"):
+            out.append(f"**Screening rationale.** {row['rationale']}")
+            out.append("")
+        if row.get("invalidation"):
+            invalidation = row["invalidation"]
+            if isinstance(invalidation, list):
+                invalidation = "; ".join(str(x) for x in invalidation)
+            out.append(f"**Invalidated if:** {invalidation}")
+            out.append("")
     return out
 
 
