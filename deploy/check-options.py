@@ -1,8 +1,12 @@
 """Check that Yahoo's option-chain endpoint still authenticates.
 
-Run on a host with real network access, from the repo checkout:
+Run on a host with real network access. Absolute paths on both halves, so it
+does not matter which directory you are standing in:
 
-    sudo /opt/marketswarm/venv/bin/python deploy/check-options.py SPY
+    sudo /opt/marketswarm/venv/bin/python /root/marketswarm/deploy/check-options.py SPY
+
+(The second path is the repo checkout. install.sh copies only the package into
+/opt, not deploy/, so this script is not there.)
 
 Why this exists rather than being read off a normal run: OptionsData's
 expirations() and chain() catch ProviderError and return empty, so the swarm
