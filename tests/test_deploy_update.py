@@ -279,8 +279,22 @@ def test_nothing_tells_the_operator_to_run_the_venv_binary_directly():
         assert not offenders, f"{name} bypasses the wrapper: {offenders}"
 
 
-def test_the_installer_installs_the_wrapper():
-    assert "marketswarm-cli" in INSTALL, "install.sh never installs the wrapper"
+def test_the_installer_installs_both_wrappers():
+    for wrapper in ("marketswarm-cli", "marketswarm-python"):
+        assert wrapper in INSTALL, f"install.sh never installs {wrapper}"
+
+
+def test_the_python_wrapper_matches_the_service_environment():
+    """Same drift risk as marketswarm-cli: a script run with the wrong data
+    directory reports on a directory the daemon does not write to."""
+    w = (DEPLOY / "marketswarm-python").read_text()
+    for var in ("MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"):
+        assert f"export {var}={_unit_field(f'Environment={var}=')}\n" in w
+    assert f"SERVICE_USER={_unit_field('User=')}" in w
+    assert "sudo -H -E" in w, "the service user would inherit root's HOME"
+    assert ". /etc/marketswarm/env" in w, "credentials would not load"
+    for bad in ("xargs", "env $(", "$(cat /etc/marketswarm/env)"):
+        assert bad not in w, f"marketswarm-python exposes secrets via {bad!r}"
 
 
 def test_the_update_delegates_the_backup_rather_than_repeating_it():

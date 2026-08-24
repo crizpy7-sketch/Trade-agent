@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# Run a MarketSwarm script with the service's environment.
+#
+#   sudo marketswarm-python /root/marketswarm/deploy/post-board.py --dry-run
+#
+# Sibling of marketswarm-cli: same environment, but for the one-off scripts in
+# deploy/ rather than the packaged CLI. install.sh copies only the package into
+# /opt, so those scripts live in the repo checkout and are run from there.
+#
+# The env file is sourced into this shell rather than passed as arguments,
+# because /proc/<pid>/cmdline is world-readable and the environment is not.
+# The Discord webhook on a command line is a webhook any local account can read.
+
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "marketswarm-python: run as root (it reads /etc/marketswarm/env)" >&2
+    exit 1
+fi
+
+# Kept in step with deploy/marketswarm.service — a test fails if they drift.
+SERVICE_USER=marketswarm
+VENV_PYTHON=/opt/marketswarm/venv/bin/python
+export MARKETSWARM_DATA_DIR=/var/lib/marketswarm
+export MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
+
+set -a
+[ -r /etc/marketswarm/env ] && . /etc/marketswarm/env
+set +a
+
+# -H so the service user gets its own HOME rather than root's; -E to carry the
+# credentials just sourced. See marketswarm-cli for why both are needed.
+exec sudo -H -E -u "$SERVICE_USER" "$VENV_PYTHON" "$@"
