@@ -179,8 +179,18 @@ def _empty(right: str, reason: str) -> ContractIdea:
 
 
 def build_board(flows: dict | None, *, slots: int = DEFAULT_SLOTS,
-                qualified_symbols: set[str] | None = None) -> dict:
+                qualified_symbols: set[str] | None = None,
+                excluded_symbols: set[str] | None = None) -> dict:
     """Exactly `slots` calls and `slots` puts. Always.
+
+    `excluded_symbols` are names the review gate rejected today. They are not
+    merely low-conviction — the swarm reached a negative conclusion about them,
+    and a CRITICAL objection is the strongest signal it produces. "No edge
+    established" and "we examined this and concluded against it" are different
+    states, and only the first is honestly expressible as a gamble. Printing a
+    rejected name as a contract to buy would let the duty to fill six slots
+    override a safety gate, which is the failure this board is most likely to
+    cause and the one it must not.
 
     `flows` is reports["options_flow"].data["flows"] — symbol -> snapshot, where
     the snapshot carries the live Chain under "chain" (flow_agents.py:60). A
@@ -190,14 +200,20 @@ def build_board(flows: dict | None, *, slots: int = DEFAULT_SLOTS,
     know which one they got.
     """
     qualified_symbols = qualified_symbols or set()
+    excluded_symbols = excluded_symbols or set()
     flows = flows or {}
 
     board: dict[str, list[ContractIdea]] = {"calls": [], "puts": []}
     tried: list[str] = []
+    barred: list[str] = []
 
     for right, key in (("call", "calls"), ("put", "puts")):
         ideas: list[ContractIdea] = []
         for symbol, snap in flows.items():
+            if symbol in excluded_symbols:
+                if symbol not in barred:
+                    barred.append(symbol)
+                continue
             chain = (snap or {}).get("chain")
             if chain is None:
                 if symbol not in tried:
@@ -218,13 +234,21 @@ def build_board(flows: dict | None, *, slots: int = DEFAULT_SLOTS,
         board[key] = ideas[:slots]
 
         while len(board[key]) < slots:
-            board[key].append(_empty(right, _no_chain_reason(flows, tried)))
+            board[key].append(_empty(right, _no_chain_reason(flows, tried, barred)))
 
     return {"calls": [i.to_dict() for i in board["calls"]],
             "puts": [i.to_dict() for i in board["puts"]]}
 
 
-def _no_chain_reason(flows: dict, tried: list[str]) -> str:
+def _no_chain_reason(flows: dict, tried: list[str], barred: list[str] | None = None) -> str:
+    if barred:
+        # Named as a count rather than a list: the reader needs to know a name
+        # was withheld and why, and the rejections themselves are already
+        # itemised in the report's review-gate section.
+        n = len(barred)
+        return (f"{n} name{'s' if n > 1 else ''} withheld — the review gate "
+                "rejected them today, and a rejected name is not a gamble the "
+                "swarm will offer. See the review gate section for which.")
     if not flows:
         return ("No option chains reached this run — the options provider "
                 "returned nothing for any symbol. This slot is empty because "

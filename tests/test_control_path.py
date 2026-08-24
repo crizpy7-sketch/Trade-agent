@@ -681,8 +681,23 @@ def test_scenario_a_red_team_rejects_everything(swarm_factory, monkeypatch):
 
     md = render_markdown(result)
     assert "Review gate" in md
+
+    # Owner's decision, 2026-08-24. This assertion used to be `"•" not in
+    # summarize(result)` — nothing offered at all on a total-rejection day.
+    # The contract board changed the question: the owner asked for contracts
+    # every session, and a board that vanishes on the worst days is not a daily
+    # board. What replaced the silence is a board that still goes out, led by an
+    # unmissable statement that the adversary rejected everything, with the
+    # rejected names themselves barred from it.
     from marketswarm.notify import summarize
-    assert "•" not in summarize(result)
+    text = summarize(result)
+    assert "RED TEAM REJECTED EVERY IDEA TODAY" in text, \
+        "the disagreement was not stated before the contracts"
+    # The invariant that has not moved: a rejected name is never offered.
+    for sym in result.publication.rejected_subjects():
+        assert f"• {sym}" not in text, f"{sym} was rejected and still offered"
+    # And nothing here may enter tracking.
+    assert "never scored" in text
 
 
 def test_scenario_b_pipeline_crash_publishes_nothing(swarm_factory, monkeypatch):

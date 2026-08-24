@@ -41,6 +41,21 @@ async def check(symbol: str, cache_dir: str) -> int:
         options = OptionsData(client)
 
         crumb = await options.session.ensure()
+        if not crumb and options.session.rate_limited:
+            # The cause this check originally failed to name. A full swarm run
+            # fetches a chain per symbol, so running it and then this back to
+            # back trips Yahoo's limit — and the answer is to wait, not to
+            # change any code.
+            print("FAIL  Yahoo is rate-limiting this host (HTTP 429).")
+            print()
+            print("      Nothing is broken. Too many requests came from this")
+            print("      server too quickly — a full swarm run fetches a chain")
+            print("      per symbol, and running this straight afterwards trips it.")
+            print()
+            print("      Wait a few minutes and run this again. If it still says")
+            print("      429 after ten minutes, the limit is on the address rather")
+            print("      than the burst, and the universe needs trimming.")
+            return 1
         if not crumb:
             print("FAIL  no Yahoo crumb — the cookie or crumb request was refused.")
             print("      Options data will be missing from every report until this")

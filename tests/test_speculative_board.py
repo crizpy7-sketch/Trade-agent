@@ -354,3 +354,46 @@ def test_no_row_claims_a_probability_or_an_edge():
         for forbidden in ("likely", "probability", "we expect", "should reach",
                           "high conviction", "strong signal"):
             assert forbidden not in text, f"{forbidden!r} in a no-edge row"
+
+
+# ============================================ rejected names are not gambles
+
+def test_a_name_the_review_gate_rejected_is_never_offered():
+    """"No edge established" and "we concluded against this" are different.
+
+    A CRITICAL objection is the strongest negative signal the swarm produces.
+    Offering that exact name as a contract — even labelled SPECULATIVE — lets
+    the duty to fill six slots override a safety gate, which is the failure this
+    board is most likely to cause. The board reads chains directly and so does
+    not otherwise know a name was rejected; it has to be told.
+    """
+    board = build_board(flows(synthetic_chain("SPY", 500.0),
+                              synthetic_chain("MSFT", 415.0)),
+                        excluded_symbols={"MSFT"})
+
+    assert board_is_complete(board)
+    assert all(r["symbol"] != "MSFT" for r in rows(board))
+    assert any(r["symbol"] == "SPY" for r in rows(board)), \
+        "the exclusion took the whole board down with it"
+
+
+def test_excluding_every_name_leaves_a_full_board_that_says_why():
+    board = build_board(flows(synthetic_chain("SPY", 500.0)),
+                        excluded_symbols={"SPY"})
+
+    assert board_is_complete(board)
+    assert all(r["tier"] == NO_CHAIN for r in rows(board))
+    reason = board["calls"][0]["reason"]
+    assert "withheld" in reason and "review gate" in reason
+    # The count is stated; the names are not re-listed here, because the
+    # rejections are itemised in the report's review-gate section and repeating
+    # them beside a contract offer is what we are trying to avoid.
+    assert "SPY" not in reason
+
+
+def test_an_exclusion_does_not_reduce_the_slot_count():
+    """The floor holds even when the exclusion empties the candidate pool."""
+    board = build_board(flows(synthetic_chain("SPY", 500.0),
+                              synthetic_chain("NVDA", 120.0)),
+                        excluded_symbols={"SPY", "NVDA"})
+    assert len(board["calls"]) == 3 and len(board["puts"]) == 3

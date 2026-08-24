@@ -245,3 +245,100 @@ def test_a_5xx_is_still_retried(tmp_path):
         assert seen["n"] == 2, "the 503 was not retried"
     finally:
         srv.shutdown()
+
+
+# ===================================================== rate limiting (429)
+
+class _Resp:
+    def __init__(self, status, text="", headers=None):
+        self.status_code, self.text = status, text
+        self.headers = headers or {}
+
+
+class _CountingHttp:
+    """Answers 429 a set number of times, then succeeds."""
+
+    def __init__(self, refusals: int, headers=None):
+        self.refusals, self.calls = refusals, 0
+        self.headers = headers or {}
+
+    async def get(self, url, headers=None, timeout=None):
+        if "getcrumb" not in url:
+            return _Resp(404)                       # the cookie call, by design
+        self.calls += 1
+        if self.calls <= self.refusals:
+            return _Resp(429, "Too Many Requests", self.headers)
+        return _Resp(200, "aBcD1234")
+
+
+#: Captured before any patching. base.asyncio IS the asyncio module, so a
+#: replacement that calls asyncio.sleep calls itself.
+_REAL_SLEEP = asyncio.sleep
+
+
+def _no_wait(monkeypatch) -> list:
+    """Record the delays the code asked for, without actually waiting."""
+    from marketswarm.providers import base
+    slept: list = []
+
+    async def fake(seconds):
+        slept.append(seconds)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(base.asyncio, "sleep", fake)
+    return slept
+
+
+def _session(http):
+    from marketswarm.providers.base import YahooSession
+    s = YahooSession.__new__(YahooSession)
+    s.client = type("C", (), {"http": http})()
+    s._crumb = None
+    s._lock = asyncio.Lock()
+    s.failed = False
+    s.rate_limited = False
+    return s
+
+
+def test_a_rate_limited_crumb_is_retried_rather_than_abandoned(monkeypatch):
+    """429 means "wait and ask again", not "refused".
+
+    A full swarm run fetches a chain per symbol, so a second run close behind
+    trips Yahoo's limit. Giving up loses the options data for the entire
+    session over a delay measured in seconds.
+    """
+    slept = _no_wait(monkeypatch)
+    http = _CountingHttp(refusals=2)
+    s = _session(http)
+
+    assert asyncio.run(s._acquire()) == "aBcD1234"
+    assert http.calls == 3, "it did not retry through the throttling"
+    assert slept, "it retried without waiting, which is what got us throttled"
+    assert s.rate_limited is False, "recovered, so it is no longer rate-limited"
+
+
+def test_persistent_throttling_gives_up_but_says_it_was_throttled(monkeypatch):
+    """The caller must be able to tell 'wait' from 'change the code'."""
+    _no_wait(monkeypatch)
+    s = _session(_CountingHttp(refusals=99))
+
+    assert asyncio.run(s._acquire()) is None
+    assert s.rate_limited is True, (
+        "throttling reported as a refusal — the diagnostic would tell the owner "
+        "Yahoo changed its endpoint when the real answer is to wait")
+
+
+def test_yahoos_own_retry_after_is_honoured_over_our_backoff(monkeypatch):
+    slept = _no_wait(monkeypatch)
+    s = _session(_CountingHttp(refusals=1, headers={"Retry-After": "7"}))
+    asyncio.run(s._acquire())
+
+    assert slept[0] == 7.0, "ignored the server's own stated wait"
+
+
+def test_an_unparseable_retry_after_falls_back_rather_than_crashing(monkeypatch):
+    """Retry-After may be an HTTP date rather than seconds."""
+    slept = _no_wait(monkeypatch)
+    s = _session(_CountingHttp(refusals=1, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}))
+    assert asyncio.run(s._acquire()) == "aBcD1234"
+    assert slept and slept[0] > 0

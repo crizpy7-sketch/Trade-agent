@@ -2,7 +2,13 @@
 #
 # Run a MarketSwarm script with the service's environment.
 #
-#   sudo marketswarm-python /root/marketswarm/deploy/post-board.py --dry-run
+#   sudo marketswarm-python check-options.py SPY
+#   sudo marketswarm-python post-board.py --dry-run
+#
+# A bare filename resolves against /opt/marketswarm/tools, where install.sh
+# puts these scripts. A path is used as given. The service user cannot read
+# /root, so pointing at the checkout fails with a permission error that reads
+# like a missing file.
 #
 # Sibling of marketswarm-cli: same environment, but for the one-off scripts in
 # deploy/ rather than the packaged CLI. install.sh copies only the package into
@@ -31,4 +37,19 @@ set +a
 
 # -H so the service user gets its own HOME rather than root's; -E to carry the
 # credentials just sourced. See marketswarm-cli for why both are needed.
-exec sudo -H -E -u "$SERVICE_USER" "$VENV_PYTHON" "$@"
+TOOLS=/opt/marketswarm/tools
+SCRIPT="$1"
+case "$SCRIPT" in
+    "")   echo "usage: marketswarm-python <script.py> [args]" >&2; exit 1 ;;
+    */*)  : ;;                                   # an explicit path, used as given
+    *)    SCRIPT="$TOOLS/$SCRIPT" ;;
+esac
+shift
+
+if [ ! -r "$SCRIPT" ]; then
+    echo "marketswarm-python: cannot read $SCRIPT" >&2
+    echo "  available: $(ls "$TOOLS" 2>/dev/null | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+exec sudo -H -E -u "$SERVICE_USER" "$VENV_PYTHON" "$SCRIPT" "$@"

@@ -221,7 +221,9 @@ def _render_daily_contracts(result) -> list[str]:
     if of is not None and getattr(of, "data", None):
         flows = of.data.get("flows")
 
-    board = build_board(flows)
+    pub = getattr(result, "publication", None)
+    rejected = pub.rejected_subjects() if pub is not None else set()
+    board = build_board(flows, excluded_symbols=rejected)
 
     out = ["## 3d. Daily Contract Board — six slots, filled every session", ""]
     out.append(
