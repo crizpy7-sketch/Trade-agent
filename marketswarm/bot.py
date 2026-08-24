@@ -35,6 +35,9 @@ import httpx
 
 from . import __version__, clock
 from .api import ReadOnlyAPI
+import json
+
+from .agents import roster
 from .config import Config
 from .memory import MemoryStore
 
@@ -174,6 +177,8 @@ class DiscordBot:
             "why": self.cmd_why,
             "calibration": self.cmd_calibration,
             "agents": self.cmd_agents,
+            "desk": self.cmd_agents,
+            "who": self.cmd_who,
         }
         handler = handlers.get(cmd)
         if not handler:
@@ -189,7 +194,8 @@ class DiscordBot:
             "`!ticker SYM` — live quote plus what the swarm said about it today\n"
             "`!why SYM` — why that symbol was rejected today\n"
             "`!calibration` — the track record so far\n"
-            "`!agents` — per-agent health\n"
+            "`!agents` — the desk: who reported and what each one found\n"
+            "`!who NAME` — one analyst's findings in full (try `!who Sasha`)\n"
             "\n_Read-only. The bot cannot run the swarm, publish, or trade._"
         )
 
@@ -345,16 +351,92 @@ class DiscordBot:
         return "\n".join(out)
 
     async def cmd_agents(self, args: list[str]) -> str:
+        """The roster and what each one found, by name.
+
+        Named rather than machine-keyed because the question people actually
+        ask is "what did Sasha see", and `options_flow` is not a thing anyone
+        says out loud.
+        """
         with self._api() as api:
             rows = api.agent_status()
         if not rows:
-            return "No agent runs recorded yet."
-        ok = [r for r in rows if r.get("status") == "ok"]
-        bad = [r for r in rows if r.get("status") != "ok"]
-        out = [f"**Agents** — {len(ok)} ok, {len(bad)} degraded"]
-        for r in bad[:12]:
-            out.append(f"• {r.get('agent')}: {r.get('status')} "
-                       f"{str(r.get('error') or '')[:90]}")
+            return ("No agent runs recorded yet — the swarm has not completed "
+                    "a session on this machine.")
+
+        by_agent = {r.get("agent"): r for r in rows}
+        # agent_runs stores AgentStatus values ("COMPLETE", "FAILED",
+        # "SKIPPED"), not the AgentReport strings ("ok", "degraded"). Comparing
+        # against "ok" marked every healthy agent as down.
+        down = {"FAILED", "SKIPPED"}
+        ok = [r for r in rows if str(r.get("status") or "").upper() not in down]
+        out = [f"**The desk** — {len(ok)} of {len(rows)} reporting"]
+
+        for agent, name, what in roster.everyone():
+            r = by_agent.get(agent)
+            if r is None:
+                continue
+            headline = (r.get("headline") or "").strip()
+            if str(r.get("status") or "").upper() in down:
+                detail = str(r.get("error") or "no reason recorded")[:70]
+                out.append(f"• **{name}** — DOWN: {detail}")
+            elif headline:
+                out.append(f"• **{name}** — {headline[:95]}")
+            else:
+                out.append(f"• **{name}** — covered {what[:70]}")
+
+        # Anyone who ran but is not on the roster: shown, not hidden. A working
+        # agent missing from a hand-maintained list is the list's fault.
+        for agent, r in by_agent.items():
+            if agent not in roster.ROSTER:
+                out.append(f"• *{agent}* (no name assigned) — {r.get('status')}")
+
+        out.append("")
+        out.append("`!who <name>` for what one of them actually found.")
+        return "\n".join(out)
+
+    async def cmd_who(self, args: list[str]) -> str:
+        """One agent's findings in full."""
+        if not args:
+            names = ", ".join(name for _, name, _ in roster.everyone())
+            return f"Usage: `!who <name>`\nThe desk: {names}"
+
+        agent = roster.resolve(args[0])
+        if agent is None:
+            return (f"No one called **{args[0]}** on the desk, or the name was "
+                    f"ambiguous. `!agents` lists everyone.")
+
+        name, what = roster.person(agent), roster.beat(agent)
+        with self._api() as api:
+            rows = [r for r in api.agent_status() if r.get("agent") == agent]
+
+        if not rows:
+            return (f"**{name}** covers {what}.\n"
+                    f"No run recorded — {name} has not reported on this machine yet.")
+
+        r = rows[0]
+        out = [f"**{name}** — {what}", ""]
+        if str(r.get("status") or "").upper() in {"FAILED", "SKIPPED"}:
+            out.append(f"**Did not report.** {r.get('error') or 'no reason recorded'}")
+            return "\n".join(out)
+
+        if r.get("headline"):
+            out.append(f"*{r['headline']}*")
+            out.append("")
+
+        findings = r.get("findings")
+        if isinstance(findings, str):
+            try:
+                findings = json.loads(findings)
+            except (ValueError, TypeError):
+                findings = None
+        for f in (findings or [])[:8]:
+            out.append(f"• {f}")
+        if not findings:
+            out.append("Reported without detail this session.")
+
+        out.append("")
+        out.append(f"_{r.get('evidence_count', 0)} sources cited · "
+                   f"{r.get('latency_ms', 0)}ms_")
         return "\n".join(out)
 
     # ---------------------------------------------------------------- loop

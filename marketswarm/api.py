@@ -81,15 +81,27 @@ class ReadOnlyAPI:
     # ---------- agents ----------
 
     def agent_status(self, run_id: int | None = None) -> list[dict]:
-        if run_id is None:
-            row = self.conn.execute("SELECT MAX(run_id) FROM agent_runs").fetchone()
-            run_id = row[0] if row else None
+        # agent_runs arrives with the 2.0 migrations, so on a machine where the
+        # swarm has never completed a run the table is simply absent. That is a
+        # normal early state, not a fault: the bot may well be started before
+        # the first 08:15, and it should say "nothing recorded yet" rather than
+        # hand the reader a raw sqlite error.
+        try:
+            if run_id is None:
+                row = self.conn.execute("SELECT MAX(run_id) FROM agent_runs").fetchone()
+                run_id = row[0] if row else None
+        except sqlite3.OperationalError:
+            return []
         if run_id is None:
             return []
-        return self._rows(
-            "SELECT agent, status, latency_ms, error, evidence_count, signal_count, "
-            "cost_usd FROM agent_runs WHERE run_id=? ORDER BY latency_ms DESC",
-            (run_id,))
+        try:
+            return self._rows(
+                "SELECT agent, status, latency_ms, error, evidence_count, signal_count, "
+                "cost_usd, headline, findings FROM agent_runs WHERE run_id=? "
+                "ORDER BY latency_ms DESC",
+                (run_id,))
+        except sqlite3.OperationalError:
+            return []
 
     def agent_performance(self) -> dict:
         matrix: dict[str, dict] = {}

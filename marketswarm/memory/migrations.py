@@ -498,7 +498,24 @@ ALTER TABLE recommendations ADD COLUMN presentation_payload TEXT;
 """)
 
 
-MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005, M006, M007]
+
+M008 = Migration(
+    version=8,
+    name="agent_findings",
+    sql="""
+-- What each agent actually found, not merely whether it succeeded.
+--
+-- agent_runs recorded status, latency and counts, so the system could say
+-- "sentiment: ok, 340ms, 4 pieces of evidence" and could not say what
+-- sentiment found. That made the obvious question — what did this agent
+-- research this morning — unanswerable from the database, and therefore
+-- unanswerable from Discord, which reads the database and never recomputes.
+ALTER TABLE agent_runs ADD COLUMN headline TEXT;
+ALTER TABLE agent_runs ADD COLUMN findings TEXT;
+""",
+)
+
+MIGRATIONS: list[Migration] = [M001, M002, M003, M004, M005, M006, M007, M008]
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
 
 

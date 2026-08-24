@@ -48,6 +48,7 @@ from .__init__ import __version__
 from .agents import ALL_AGENTS, AgentReport, SwarmContext
 from .agents.base import DEFAULT_AGENT_TIMEOUT
 from .config import Config
+from .observability import Observatory
 from .memory import LearningEngine, MemoryStore, Prediction
 from .publication import PublicationSet
 from .resilience import BREAKERS
@@ -587,7 +588,15 @@ class Swarm:
                 gap = b.get("calibration_gap")
                 break
 
-            pipeline = Pipeline2(self.config, store=self.store)
+            # With no run_id every agent_runs row is written NULL, and
+            # agent_status() keys off MAX(run_id) — so the whole table was
+            # invisible to the read API and `!agents` answered "no runs"
+            # forever, on a database that had them.
+            pipeline = Pipeline2(
+                self.config, store=self.store,
+                observatory=Observatory(conn=getattr(self.store, "conn", None),
+                                        run_id=result.run_id),
+            )
             # Pipeline2 is a synchronous state machine by design. Running it on
             # a worker thread lets its follow-up investigator schedule real
             # agent work back onto this event loop without either side having
