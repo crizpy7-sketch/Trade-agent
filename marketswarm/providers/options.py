@@ -214,7 +214,11 @@ class Chain:
         if not ac:
             return 0.0
         sp = ac.spread_pct
-        spread_score = 1.0 if math.isnan(sp) else max(0.0, 1.0 - sp / 15.0)
+        # NaN means ask <= bid — a crossed or one-sided quote, which is the
+        # least tradable state there is. Scored as a perfect 1.0 it sorted the
+        # worst chains first, so ranking preferred exactly the contracts nobody
+        # can get out of.
+        spread_score = 0.0 if math.isnan(sp) else max(0.0, 1.0 - sp / 15.0)
         vol_score = min(1.0, (self.total_call_volume + self.total_put_volume) / 50_000)
         return round(0.6 * spread_score + 0.4 * vol_score, 3)
 
