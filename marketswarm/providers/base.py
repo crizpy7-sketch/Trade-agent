@@ -300,6 +300,10 @@ class YahooSession:
         #: need opposite responses — wait, versus change the code — and a caller
         #: that cannot tell them apart will report the wrong one.
         self.rate_limited = False
+        #: How many cookies Yahoo issued on the last attempt. Zero is the
+        #: interesting case: it means the host is being served pages but denied
+        #: a session, which no retry or endpoint change can fix.
+        self.cookie_count = 0
 
     @property
     def crumb(self) -> str | None:
@@ -326,6 +330,19 @@ class YahooSession:
             await http.get(YAHOO_COOKIE_URL, headers=headers, timeout=10.0)
         except Exception as exc:  # noqa: BLE001 — no cookie is survivable
             log.debug("yahoo cookie fetch failed: %s", exc)
+
+        try:
+            self.cookie_count = len(http.cookies)
+        except Exception:  # noqa: BLE001 — a count is diagnostics, not control flow
+            self.cookie_count = 0
+        if not self.cookie_count:
+            # Observed in production: Yahoo answers finance.yahoo.com with 200
+            # and no Set-Cookie at all, then 429s the crumb endpoint. That reads
+            # as throttling and is not — it is the address being denied a
+            # session. Retrying cannot help, and saying "wait a few minutes"
+            # sends the reader to fix the wrong thing.
+            log.warning("yahoo issued no session cookie — this host is being "
+                        "served pages but denied a session")
 
         self.rate_limited = False
         for attempt in range(1, YAHOO_CRUMB_ATTEMPTS + 1):

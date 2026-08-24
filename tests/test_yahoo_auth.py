@@ -342,3 +342,43 @@ def test_an_unparseable_retry_after_falls_back_rather_than_crashing(monkeypatch)
     s = _session(_CountingHttp(refusals=1, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}))
     assert asyncio.run(s._acquire()) == "aBcD1234"
     assert slept and slept[0] > 0
+
+
+class _NoCookieHttp:
+    """Serves pages but issues no session — what the VPS actually observes."""
+
+    def __init__(self):
+        self.cookies = {}          # nothing was set
+
+    async def get(self, url, headers=None, timeout=None):
+        if "getcrumb" in url:
+            # Yahoo answers the crumb endpoint 429 when there is no session.
+            # It reads exactly like throttling and is not.
+            return _Resp(429, "Too Many Requests")
+        return _Resp(200, "<html>…</html>")
+
+
+def test_no_session_cookie_is_not_reported_as_rate_limiting(monkeypatch):
+    """The distinction that cost three wrong diagnoses in production.
+
+    Yahoo serves this host 200 with no Set-Cookie, then 429s the crumb. Reading
+    the 429 alone says "throttled, wait a few minutes" — which sends the reader
+    to fix the wrong thing, because no wait and no retry can produce a session
+    that is not being issued.
+    """
+    _no_wait(monkeypatch)
+    s = _session(_NoCookieHttp())
+
+    assert asyncio.run(s._acquire()) is None
+    assert s.cookie_count == 0, "the absent session was not detected"
+
+
+def test_a_session_that_exists_is_counted(monkeypatch):
+    """So the two failures stay distinguishable in the other direction."""
+    _no_wait(monkeypatch)
+    http = _CountingHttp(refusals=0)
+    http.cookies = {"A1": "x", "A3": "y"}
+    s = _session(http)
+
+    assert asyncio.run(s._acquire()) == "aBcD1234"
+    assert s.cookie_count == 2

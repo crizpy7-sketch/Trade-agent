@@ -41,6 +41,23 @@ async def check(symbol: str, cache_dir: str) -> int:
         options = OptionsData(client)
 
         crumb = await options.session.ensure()
+        if not crumb and options.session.cookie_count == 0:
+            print("FAIL  Yahoo issued no session cookie to this host.")
+            print()
+            print("      This is not rate limiting, and waiting will not help.")
+            print("      Yahoo serves this server pages (200) but sends no")
+            print("      Set-Cookie, so there is no session to attach a crumb to.")
+            print("      The crumb endpoint then answers 429, which reads like")
+            print("      throttling and is not.")
+            print()
+            print("      Confirm with:")
+            print("        curl -sS -D - -o /dev/null https://finance.yahoo.com/ "
+                  "| grep -i set-cookie")
+            print("      No output means no session is being issued.")
+            print()
+            print("      No code change fixes this — it is the server's address.")
+            print("      Options data needs a provider with an API key instead.")
+            return 1
         if not crumb and options.session.rate_limited:
             # The cause this check originally failed to name. A full swarm run
             # fetches a chain per symbol, so running it and then this back to
