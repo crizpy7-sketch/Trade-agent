@@ -27,7 +27,7 @@ DEFAULT_UNIVERSE = [
 DEFAULT_INDEX_SYMBOLS = ["SPY", "QQQ", "IWM"]
 
 SECRET_CONFIG_KEYS = {
-    "fred_api_key", "anthropic_api_key", "webhook_url",
+    "fred_api_key", "anthropic_api_key", "webhook_url", "polygon_api_key",
     "discord_bot_token", "x_bearer_token",
 }
 
@@ -72,6 +72,11 @@ class Config:
     llm_enabled: bool = True
     contact_email: str = "set MARKETSWARM_CONTACT"
     webhook_url: str | None = None
+    #: Where option chains come from. "auto" uses Polygon when a key is set and
+    #: falls back to Yahoo otherwise; "yahoo" or "polygon" force one. Forcing is
+    #: what makes a bad switch recoverable without a deploy.
+    options_provider: str = "auto"
+    polygon_api_key: str | None = None
     notify_on: str = "always"          # always | high_confidence | never
 
     # Permissioned community research. Secrets stay environment-only; the
@@ -153,6 +158,8 @@ class Config:
             "MARKETSWARM_MODEL": ("llm_model", str),
             "MARKETSWARM_CONTACT": ("contact_email", str),
             "MARKETSWARM_WEBHOOK": ("webhook_url", str),
+            "MARKETSWARM_OPTIONS_PROVIDER": ("options_provider", str),
+            "MARKETSWARM_POLYGON_KEY": ("polygon_api_key", str),
             "MARKETSWARM_DISCORD_BOT_TOKEN": ("discord_bot_token", str),
             "X_BEARER_TOKEN": ("x_bearer_token", str),
             "MARKETSWARM_DATA_DIR": ("data_dir", lambda v: Path(v).expanduser()),

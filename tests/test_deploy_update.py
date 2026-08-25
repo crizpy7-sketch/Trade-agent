@@ -19,6 +19,7 @@ the repo and cannot see the installed unit or a value overridden in
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -201,6 +202,66 @@ def test_the_wrapper_keeps_secrets_out_of_the_process_list():
         assert bad not in WRAPPER, f"marketswarm-cli exposes secrets via {bad!r}"
 
 
+# ------------------------------------------- the wrapper, actually run
+
+def run_wrapper(tmp_path: Path):
+    """Run the wrapper for real, with sudo replaced by a shim.
+
+    The shim lets it reach its final `exec` without the marketswarm account or
+    the installed venv existing, and reports the arguments and environment it
+    was handed — which is what the CLI would actually receive.
+
+    What the shim deliberately does NOT prove is that ``sudo -H`` beats ``-E``
+    for HOME. That is sudo's behaviour, not this repo's; it was confirmed by
+    hand (`HOME=/root sudo -H -E -u someone sh -c 'echo $HOME'` prints the
+    target's home, either flag order). Emulating it here would only test the
+    emulation, so the check below is that -H is passed at all.
+    """
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    shim = shims / "sudo"
+    shim.write_text(
+        '#!/bin/sh\n'
+        'echo "ARGS: $*"\n'
+        'echo "MARKETSWARM_DATA_DIR=$MARKETSWARM_DATA_DIR"\n'
+        'echo "MARKETSWARM_REPORT_DIR=$MARKETSWARM_REPORT_DIR"\n')
+    shim.chmod(0o755)
+
+    return subprocess.run(
+        ["sh", str(DEPLOY / "marketswarm-cli"), "status"],
+        capture_output=True, text=True,
+        env={"PATH": f"{shims}:/usr/bin:/bin", "HOME": "/root"},
+    )
+
+
+needs_root = pytest.mark.skipif(
+    os.geteuid() != 0, reason="the wrapper refuses to run as non-root")
+
+
+@needs_root
+def test_running_the_wrapper_hands_over_the_services_directories(tmp_path):
+    """The text assertions above check what is written; this checks what arrives."""
+    result = run_wrapper(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    for var in ("MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"):
+        assert f"{var}={_unit_field(f'Environment={var}=')}" in result.stdout
+
+
+@needs_root
+def test_running_the_wrapper_drops_to_the_service_user_with_its_own_home(tmp_path):
+    result = run_wrapper(tmp_path)
+    user = _unit_field("User=")
+    binary = _unit_field("ExecStart=").split()[0]
+    assert f"ARGS: -H -E -u {user} {binary} status" in result.stdout
+
+
+@needs_root
+def test_the_wrapper_passes_its_arguments_through(tmp_path):
+    """A wrapper that silently dropped them would run the wrong subcommand."""
+    assert "status" in run_wrapper(tmp_path).stdout
+
+
 # --------------------------------------------- what the scripts and docs print
 
 def test_nothing_tells_the_operator_to_run_the_venv_binary_directly():
@@ -218,8 +279,22 @@ def test_nothing_tells_the_operator_to_run_the_venv_binary_directly():
         assert not offenders, f"{name} bypasses the wrapper: {offenders}"
 
 
-def test_the_installer_installs_the_wrapper():
-    assert "marketswarm-cli" in INSTALL, "install.sh never installs the wrapper"
+def test_the_installer_installs_both_wrappers():
+    for wrapper in ("marketswarm-cli", "marketswarm-python"):
+        assert wrapper in INSTALL, f"install.sh never installs {wrapper}"
+
+
+def test_the_python_wrapper_matches_the_service_environment():
+    """Same drift risk as marketswarm-cli: a script run with the wrong data
+    directory reports on a directory the daemon does not write to."""
+    w = (DEPLOY / "marketswarm-python").read_text()
+    for var in ("MARKETSWARM_DATA_DIR", "MARKETSWARM_REPORT_DIR"):
+        assert f"export {var}={_unit_field(f'Environment={var}=')}\n" in w
+    assert f"SERVICE_USER={_unit_field('User=')}" in w
+    assert "sudo -H -E" in w, "the service user would inherit root's HOME"
+    assert ". /etc/marketswarm/env" in w, "credentials would not load"
+    for bad in ("xargs", "env $(", "$(cat /etc/marketswarm/env)"):
+        assert bad not in w, f"marketswarm-python exposes secrets via {bad!r}"
 
 
 def test_the_update_delegates_the_backup_rather_than_repeating_it():

@@ -104,6 +104,13 @@ log "Bot unit installed (not enabled — configure it, then: systemctl enable --
 # cannot come apart.
 CLI_BIN="/usr/local/bin/marketswarm-cli"
 install -m 755 "$REPO_DIR/deploy/marketswarm-cli" "$CLI_BIN"
+install -m 755 "$REPO_DIR/deploy/marketswarm-python" /usr/local/bin/marketswarm-python
+
+# The one-off scripts run as the service user, which cannot read /root.
+# Copied somewhere it can, so `marketswarm-python check-options.py` works
+# regardless of where the checkout happens to live.
+install -d -o "$APP_USER" -g "$APP_USER" "$APP_DIR/tools"
+install -m 755 -o "$APP_USER" -g "$APP_USER" "$REPO_DIR"/deploy/*.py "$APP_DIR/tools/"
 RUN_CLI="sudo $(basename "$CLI_BIN")"
 
 cat <<EOF

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import clock
 from .orchestrator import SwarmResult
+from .recommend.speculative import build_board
 
 DISCLAIMER = (
     "**Research and educational analysis only — not financial advice, not a recommendation "
@@ -171,6 +172,10 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
         out.append("The playbook could not be constructed — insufficient data this morning.")
         if pb and pb.error:
             out.append(f"> {pb.error}")
+        out.append("")
+        # The board still renders. A failed playbook is exactly the day the
+        # owner asked about, and this exit used to take the board down with it.
+        out.extend(_render_supporting_sections(result))
         return "\n".join(out)
 
     # The publication set is the source of the ideas below; the playbook
@@ -198,10 +203,75 @@ def render_markdown(result: SwarmResult, narrative: str | None = None,
     return "\n".join(out)
 
 
+def _render_daily_contracts(result) -> list[str]:
+    """Six contracts, every session, whatever else the run decided.
+
+    Rendered from _render_supporting_sections precisely because that is called
+    on both the normal and the suppressed path — a board that disappears on the
+    days the pipeline gives up is not a daily board.
+
+    A filled slot here is deliberately NOT an endorsement. The tier on each row
+    says how much belief is behind it, and on most days the honest answer is
+    none. That separation is the only thing that makes always-emitting safe:
+    without it, a fixed board plus a duty to fill it is a machine for
+    manufacturing conviction.
+    """
+    flows = None
+    of = result.reports.get("options_flow")
+    if of is not None and getattr(of, "data", None):
+        flows = of.data.get("flows")
+
+    pub = getattr(result, "publication", None)
+    rejected = pub.rejected_subjects() if pub is not None else set()
+    board = build_board(flows, excluded_symbols=rejected)
+
+    out = ["## 3d. Daily Contract Board — six slots, filled every session", ""]
+    out.append(
+        "*Not recommendations. Each row states the tier behind it: QUALIFIED "
+        "cleared the swarm's gates, SPECULATIVE means no edge was established, "
+        "LOTTERY means the contract is real but the data is thin, NO CHAIN "
+        "means the option data was missing. Nothing here is scored or added to "
+        "the track record.*"
+    )
+    out.append("")
+
+    for title, key, right in (("Calls", "calls", "call"), ("Puts", "puts", "put")):
+        out.append(f"### {title}")
+        out.append("")
+        for n, row in enumerate(board[key], 1):
+            if row["strike"] is None:
+                out.append(f"**Slot {n} — {row['tier']}**")
+                out.append("")
+                out.append(f"> {row['reason']}")
+                out.append("")
+                continue
+            out.append(
+                f"**Slot {n} — {row['tier']}: {row['symbol']} {row['strike']:g} "
+                f"{right.upper()} · exp {row['expiration']}**"
+            )
+            out.append("")
+            out.append(f"> {row['reason']}")
+            out.append("")
+            out.append("| | |")
+            out.append("|---|---|")
+            out.append(f"| Premium (mid) | ${row['premium']:.2f} |")
+            out.append(f"| Cost, 1 contract | ${row['cost']:,.2f} |")
+            out.append(f"| Max loss | ${row['max_loss']:,.2f} — the whole premium |")
+            out.append(f"| Breakeven at expiry | ${row['breakeven']:.2f} |")
+            if row.get("delta") is not None:
+                out.append(f"| Delta | {row['delta']:.2f} |")
+            if row.get("spread_pct") is not None:
+                out.append(f"| Bid/ask spread | {row['spread_pct']:.1f}% of mid |")
+            out.append(f"| Open interest / volume | {row['open_interest']:,} / {row['volume']:,} |")
+            out.append("")
+
+    return out
+
+
 def _render_supporting_sections(result) -> list[str]:
     """Red team and the reading guide — shown whether or not anything was
     published, because the objections are informative either way."""
-    out: list[str] = []
+    out: list[str] = _render_daily_contracts(result)
 
     rt = result.reports.get("red_team")
     if rt and rt.usable and rt.data.get("objections"):

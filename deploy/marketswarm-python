@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# Run a MarketSwarm script with the service's environment.
+#
+#   sudo marketswarm-python check-options.py SPY
+#   sudo marketswarm-python post-board.py --dry-run
+#
+# A bare filename resolves against /opt/marketswarm/tools, where install.sh
+# puts these scripts. A path is used as given. The service user cannot read
+# /root, so pointing at the checkout fails with a permission error that reads
+# like a missing file.
+#
+# Sibling of marketswarm-cli: same environment, but for the one-off scripts in
+# deploy/ rather than the packaged CLI. install.sh copies only the package into
+# /opt, so those scripts live in the repo checkout and are run from there.
+#
+# The env file is sourced into this shell rather than passed as arguments,
+# because /proc/<pid>/cmdline is world-readable and the environment is not.
+# The Discord webhook on a command line is a webhook any local account can read.
+
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "marketswarm-python: run as root (it reads /etc/marketswarm/env)" >&2
+    exit 1
+fi
+
+# Kept in step with deploy/marketswarm.service — a test fails if they drift.
+SERVICE_USER=marketswarm
+VENV_PYTHON=/opt/marketswarm/venv/bin/python
+export MARKETSWARM_DATA_DIR=/var/lib/marketswarm
+export MARKETSWARM_REPORT_DIR=/var/lib/marketswarm/reports
+
+set -a
+[ -r /etc/marketswarm/env ] && . /etc/marketswarm/env
+set +a
+
+# -H so the service user gets its own HOME rather than root's; -E to carry the
+# credentials just sourced. See marketswarm-cli for why both are needed.
+TOOLS=/opt/marketswarm/tools
+SCRIPT="$1"
+case "$SCRIPT" in
+    "")   echo "usage: marketswarm-python <script.py> [args]" >&2; exit 1 ;;
+    */*)  : ;;                                   # an explicit path, used as given
+    *)    SCRIPT="$TOOLS/$SCRIPT" ;;
+esac
+shift
+
+if [ ! -r "$SCRIPT" ]; then
+    echo "marketswarm-python: cannot read $SCRIPT" >&2
+    echo "  available: $(ls "$TOOLS" 2>/dev/null | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+exec sudo -H -E -u "$SERVICE_USER" "$VENV_PYTHON" "$SCRIPT" "$@"

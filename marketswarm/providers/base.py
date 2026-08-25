@@ -252,12 +252,30 @@ class DataClient:
 # endpoints. This is not an attempt to hide what the agent is — the contact
 # address still travels on every other request, and the rate limiter is
 # unchanged — it is the minimum the endpoint accepts.
+#: Yahoo answers 429 when a host asks too often — a full swarm run fetches a
+#: chain per symbol, so a second run close behind trips it. That is a "wait and
+#: ask again", not a refusal, and treating it as one loses options data for the
+#: whole session over a delay measured in seconds.
+YAHOO_CRUMB_ATTEMPTS = 3
+YAHOO_CRUMB_BACKOFF = 3.0
+
 YAHOO_BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 YAHOO_COOKIE_URL = "https://fc.yahoo.com/"
 YAHOO_CRUMB_URL = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+
+
+def _retry_after(response) -> float | None:
+    """Seconds from a Retry-After header, when the server states one."""
+    raw = (response.headers or {}).get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None      # the HTTP-date form; fall back to our own backoff
 
 
 class YahooSession:
@@ -278,6 +296,14 @@ class YahooSession:
         self._crumb: str | None = None
         self._lock = asyncio.Lock()
         self.failed = False
+        #: True when the last attempt was throttled rather than refused. The two
+        #: need opposite responses — wait, versus change the code — and a caller
+        #: that cannot tell them apart will report the wrong one.
+        self.rate_limited = False
+        #: How many cookies Yahoo issued on the last attempt. Zero is the
+        #: interesting case: it means the host is being served pages but denied
+        #: a session, which no retry or endpoint change can fix.
+        self.cookie_count = 0
 
     @property
     def crumb(self) -> str | None:
@@ -306,21 +332,53 @@ class YahooSession:
             log.debug("yahoo cookie fetch failed: %s", exc)
 
         try:
-            r = await http.get(YAHOO_CRUMB_URL, headers=headers, timeout=10.0)
-        except Exception as exc:  # noqa: BLE001 — degrade, never crash the run
-            log.warning("yahoo crumb unavailable: %s", exc)
-            return None
+            self.cookie_count = len(http.cookies)
+        except Exception:  # noqa: BLE001 — a count is diagnostics, not control flow
+            self.cookie_count = 0
+        if not self.cookie_count:
+            # Observed in production: Yahoo answers finance.yahoo.com with 200
+            # and no Set-Cookie at all, then 429s the crumb endpoint. That reads
+            # as throttling and is not — it is the address being denied a
+            # session. Retrying cannot help, and saying "wait a few minutes"
+            # sends the reader to fix the wrong thing.
+            log.warning("yahoo issued no session cookie — this host is being "
+                        "served pages but denied a session")
 
-        crumb = (r.text or "").strip()
-        # A crumb is a short opaque token. An HTML page here means Yahoo served
-        # a consent or block interstitial, and treating that as a crumb would
-        # send garbage on every subsequent call.
-        if r.status_code != 200 or not crumb or len(crumb) > 64 or "<" in crumb:
-            log.warning("yahoo crumb rejected: status=%s len=%d",
-                        r.status_code, len(crumb))
-            return None
-        log.info("yahoo session established")
-        return crumb
+        self.rate_limited = False
+        for attempt in range(1, YAHOO_CRUMB_ATTEMPTS + 1):
+            try:
+                r = await http.get(YAHOO_CRUMB_URL, headers=headers, timeout=10.0)
+            except Exception as exc:  # noqa: BLE001 — degrade, never crash the run
+                log.warning("yahoo crumb unavailable: %s", exc)
+                return None
+
+            if r.status_code == 429:
+                # Yahoo's own Retry-After when it sends one; otherwise widen the
+                # gap each time rather than hammering a host already saying stop.
+                wait = _retry_after(r) or YAHOO_CRUMB_BACKOFF * attempt
+                self.rate_limited = True
+                if attempt == YAHOO_CRUMB_ATTEMPTS:
+                    log.warning("yahoo is rate-limiting this host (429) after "
+                                "%d attempts — options data unavailable this run",
+                                attempt)
+                    return None
+                log.info("yahoo rate-limited the crumb request; waiting %.0fs "
+                         "(attempt %d of %d)", wait, attempt, YAHOO_CRUMB_ATTEMPTS)
+                await asyncio.sleep(wait)
+                continue
+
+            crumb = (r.text or "").strip()
+            # A crumb is a short opaque token. An HTML page here means Yahoo
+            # served a consent or block interstitial, and treating that as a
+            # crumb would send garbage on every subsequent call.
+            if r.status_code != 200 or not crumb or len(crumb) > 64 or "<" in crumb:
+                log.warning("yahoo crumb rejected: status=%s len=%d",
+                            r.status_code, len(crumb))
+                return None
+            self.rate_limited = False
+            log.info("yahoo session established")
+            return crumb
+        return None
 
     def headers(self) -> dict:
         return {"User-Agent": YAHOO_BROWSER_UA}

@@ -48,6 +48,8 @@ from .__init__ import __version__
 from .agents import ALL_AGENTS, AgentReport, SwarmContext
 from .agents.base import DEFAULT_AGENT_TIMEOUT
 from .config import Config
+from .observability import Observatory
+from .providers.chains import select_source
 from .memory import LearningEngine, MemoryStore, Prediction
 from .publication import PublicationSet
 from .resilience import BREAKERS
@@ -265,6 +267,23 @@ class Swarm:
         except Exception as exc:  # noqa: BLE001 — never block a run on migrations
             log.error("schema migration failed, continuing on the existing schema: %s", exc)
 
+    def _options(self, client):
+        """Options data, with a chain source attached when one is configured.
+
+        The source is assigned rather than passed to the constructor because
+        tests substitute OptionsData with a one-argument factory. Widening the
+        call would break every one of those doubles and buy nothing — the
+        selection is the same either way, and a fake that ignores the attribute
+        is unaffected.
+        """
+        options = OptionsData(client)
+        source = select_source(client, provider=self.config.options_provider,
+                               polygon_key=self.config.polygon_api_key)
+        if source is not None:
+            options.source = source
+            log.info("option chains via %s", source.name)
+        return options
+
     async def run(self, run_date: dt.date | None = None, force: bool = False,
                   mode: str | None = None) -> SwarmResult:
         run_date = run_date or clock.now_et().date()
@@ -308,7 +327,7 @@ class Swarm:
                 universe=self.config.universe,
                 index_symbols=self.config.index_symbols,
                 market=MarketData(client),
-                options=OptionsData(client),
+                options=self._options(client),
                 news=NewsData(client, universe=set(self.config.universe)),
                 econ=EconData(client, self.config.fred_api_key),
                 edgar=EdgarData(client, self.config.user_agent),
@@ -587,7 +606,15 @@ class Swarm:
                 gap = b.get("calibration_gap")
                 break
 
-            pipeline = Pipeline2(self.config, store=self.store)
+            # With no run_id every agent_runs row is written NULL, and
+            # agent_status() keys off MAX(run_id) — so the whole table was
+            # invisible to the read API and `!agents` answered "no runs"
+            # forever, on a database that had them.
+            pipeline = Pipeline2(
+                self.config, store=self.store,
+                observatory=Observatory(conn=getattr(self.store, "conn", None),
+                                        run_id=result.run_id),
+            )
             # Pipeline2 is a synchronous state machine by design. Running it on
             # a worker thread lets its follow-up investigator schedule real
             # agent work back onto this event loop without either side having

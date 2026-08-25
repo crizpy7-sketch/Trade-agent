@@ -57,6 +57,8 @@ class AgentTrace:
     cost_usd: float = 0.0
     evidence_count: int = 0
     signal_count: int = 0
+    headline: str | None = None
+    findings: list[str] = field(default_factory=list)
 
     def to_row(self) -> tuple:
         return (
@@ -66,6 +68,8 @@ class AgentTrace:
             json.dumps(self.providers), self.llm_model, self.llm_input_tokens,
             self.llm_output_tokens, self.cost_usd, self.evidence_count,
             self.signal_count,
+            redact(self.headline) if self.headline else None,
+            json.dumps([redact(f) for f in self.findings]) if self.findings else None,
         )
 
 
@@ -128,6 +132,10 @@ class Observatory:
         t.error = getattr(report, "error", None)
         t.evidence_count = len(getattr(report, "evidence", []) or [])
         t.signal_count = len(getattr(report, "signals", []) or [])
+        t.headline = getattr(report, "headline", None)
+        # Capped: this is a Discord answer, not an archive, and an unbounded
+        # findings list from one agent would crowd out the other fifteen.
+        t.findings = [str(f) for f in (getattr(report, "findings", None) or [])][:12]
         t.finished_at = t.finished_at or dt.datetime.now(dt.timezone.utc).isoformat()
         self._traces[name] = t
         self._status[name] = t.status
@@ -142,8 +150,8 @@ class Observatory:
                    (run_id, investigation_id, agent, status, started_at, finished_at,
                     latency_ms, retries, error, tool_calls, providers, llm_model,
                     llm_input_tokens, llm_output_tokens, cost_usd, evidence_count,
-                    signal_count)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", t.to_row())
+                    signal_count, headline, findings)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", t.to_row())
             self.conn.commit()
         except sqlite3.Error as exc:
             log.debug("trace persist failed: %s", exc)
