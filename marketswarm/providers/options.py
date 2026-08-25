@@ -241,9 +241,13 @@ def _parse_contract(raw: dict, kind: str) -> Contract | None:
 
 
 class OptionsData:
-    def __init__(self, client: DataClient):
+    def __init__(self, client: DataClient, source=None):
         self.client = client
         self.session = YahooSession(client)
+        #: When set, chains come from here instead of Yahoo. Everything above
+        #: this line — implied move, skew, walls, the contract board — works on
+        #: a Chain and never learns which provider built it.
+        self.source = source
 
     async def _chain_json(self, symbol: str, params: dict | None = None,
                           use_cache: bool = True) -> dict:
@@ -271,6 +275,8 @@ class OptionsData:
                 use_cache=False, headers=self.session.headers())
 
     async def expirations(self, symbol: str) -> list[dt.date]:
+        if self.source is not None:
+            return await self.source.expirations(symbol)
         try:
             payload = await self._chain_json(symbol)
             stamps = payload["optionChain"]["result"][0].get("expirationDates", [])
@@ -280,6 +286,8 @@ class OptionsData:
         return [dt.datetime.fromtimestamp(s, tz=dt.timezone.utc).date() for s in stamps]
 
     async def chain(self, symbol: str, expiration: dt.date | None = None) -> Chain | None:
+        if self.source is not None:
+            return await self.source.chain(symbol, expiration)
         params = {}
         if expiration:
             params["date"] = int(
@@ -316,6 +324,10 @@ class OptionsData:
         upcoming = [e for e in exps if e >= today][:count]
         chains = await self.client.gather([self.chain(symbol, e) for e in upcoming], label="chains")
         return [c for c in chains if isinstance(c, Chain)]
+
+    @property
+    def provider_name(self) -> str:
+        return getattr(self.source, "name", "yahoo")
 
     async def flow_snapshot(self, symbol: str) -> dict | None:
         """Everything the options layer contributes about one underlying."""

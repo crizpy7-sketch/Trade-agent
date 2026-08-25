@@ -31,14 +31,32 @@ import sys
 import tempfile
 
 from marketswarm.providers.base import DataClient
+from marketswarm.config import Config
+from marketswarm.providers.chains import select_source
 from marketswarm.providers.options import OptionsData
 
 
 async def check(symbol: str, cache_dir: str) -> int:
     # A throwaway cache, so the check neither reads a stale success nor leaves
     # anything behind in whichever account happens to run it.
+    cfg = Config.load()
     async with DataClient(cache_dir=cache_dir) as client:
-        options = OptionsData(client)
+        source = select_source(client, provider=cfg.options_provider,
+                               polygon_key=cfg.polygon_api_key)
+        options = OptionsData(client, source=source)
+        print(f"provider: {options.provider_name}")
+
+        if source is not None:
+            # A provider with its own account tells us far more than a
+            # pass/fail: whether the key works, whether the plan includes
+            # option snapshots, and what actually came back.
+            print(await source.diagnose(symbol))
+            chain = await options.chain(symbol, (await options.expirations(symbol) or [None])[0])
+            if chain is None:
+                print("\nFAIL  no usable chain — see the line above for why")
+                return 1
+            print(f"\nPASS  options data is live via {options.provider_name}")
+            return 0
 
         crumb = await options.session.ensure()
         if not crumb and options.session.cookie_count == 0:
